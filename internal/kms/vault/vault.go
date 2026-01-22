@@ -14,6 +14,12 @@ import (
 	"rootseal/internal/kms"
 )
 
+func init() {
+	kms.RegisterProvider("vault", func(cfg *kms.Config) (kms.Provider, error) {
+		return NewProvider(cfg)
+	})
+}
+
 // Provider implements kms.Provider using HashiCorp Vault Transit
 type Provider struct {
 	client      *vault.Client

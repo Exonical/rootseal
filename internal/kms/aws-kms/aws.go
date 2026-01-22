@@ -14,6 +14,12 @@ import (
 	rootsealkms "rootseal/internal/kms"
 )
 
+func init() {
+	rootsealkms.RegisterProvider("aws-kms", func(cfg *rootsealkms.Config) (rootsealkms.Provider, error) {
+		return NewProvider(cfg)
+	})
+}
+
 // Provider implements kms.Provider using AWS KMS
 type Provider struct {
 	client *kms.Client

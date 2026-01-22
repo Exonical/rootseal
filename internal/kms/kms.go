@@ -142,3 +142,28 @@ var ErrKeyNotFound = fmt.Errorf("key not found")
 
 // ErrUnwrapFailed is returned when key unwrapping fails
 var ErrUnwrapFailed = fmt.Errorf("key unwrap failed")
+
+// ProviderFactory is a function that creates a KMS provider from config
+type ProviderFactory func(cfg *Config) (Provider, error)
+
+// providerFactories holds registered provider factories
+var providerFactories = make(map[string]ProviderFactory)
+
+// RegisterProvider registers a provider factory
+func RegisterProvider(name string, factory ProviderFactory) {
+	providerFactories[name] = factory
+}
+
+// NewProvider creates a KMS provider based on configuration
+func NewProvider(cfg *Config) (Provider, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("kms config is nil")
+	}
+
+	factory, ok := providerFactories[cfg.Provider]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s (available: vault, aws-kms, azure-keyvault, fortanix-sdkms)", ErrProviderNotFound, cfg.Provider)
+	}
+
+	return factory(cfg)
+}

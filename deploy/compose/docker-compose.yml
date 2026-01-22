@@ -57,6 +57,21 @@ services:
       # TPM PCR policy configuration
       TPM_REQUIRED_PCRS: "0,2,7"  # PCRs required in attestation quotes
       TPM_ENFORCE_PCR_VALUES: "false"  # Set to "true" to enforce specific PCR values
+      # KMS provider configuration
+      # KMS_PROVIDER: "vault" (default), "aws-kms", "azure-keyvault", "fortanix-sdkms"
+      KMS_PROVIDER: "vault"
+      # Vault KMS settings (used when KMS_PROVIDER=vault)
+      KMS_VAULT_TRANSIT_PATH: "transit"
+      KMS_VAULT_KEY_NAME: "recovery-key"
+      # AWS KMS settings (used when KMS_PROVIDER=aws-kms)
+      # KMS_AWS_KEY_ID: "alias/rootseal-key"
+      # AWS_REGION: "us-east-1"
+      # Azure Key Vault settings (used when KMS_PROVIDER=azure-keyvault)
+      # KMS_AZURE_VAULT_URL: "https://myvault.vault.azure.net"
+      # KMS_AZURE_KEY_NAME: "rootseal-key"
+      # Fortanix SDKMS settings (used when KMS_PROVIDER=fortanix-sdkms)
+      # KMS_FORTANIX_ENDPOINT: "https://sdkms.fortanix.com"
+      # KMS_FORTANIX_KEY_ID: "key-uuid"
     command: ["/usr/local/bin/rootseal-server"]
 
 volumes:

@@ -13,6 +13,12 @@ import (
 	"rootseal/internal/kms"
 )
 
+func init() {
+	kms.RegisterProvider("fortanix-sdkms", func(cfg *kms.Config) (kms.Provider, error) {
+		return NewProvider(cfg)
+	})
+}
+
 // Provider implements kms.Provider using Fortanix SDKMS
 type Provider struct {
 	endpoint string

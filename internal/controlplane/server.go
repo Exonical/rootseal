@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"rootseal/internal/kms"
 	"rootseal/internal/tpm2"
 	"rootseal/pkg/api"
 
@@ -31,7 +32,8 @@ type server struct {
 	api.UnimplementedLuksManagerServer
 	api.UnimplementedAgentServiceServer
 	vaultClient  *vault.Client
-	vaultService *VaultService
+	vaultService *VaultService // Legacy, kept for metadata storage
+	kmsProvider  kms.Provider
 	db           *DB
 	pcrPolicy    *tpm2.PCRPolicy
 }
@@ -202,6 +204,10 @@ type ServerConfig struct {
 	VaultToken       string
 	RequiredPCRs     string // Comma-separated list of PCR indices (e.g., "0,2,7,11")
 	EnforcePCRValues bool   // If true, reject quotes with unexpected PCR values
+
+	// KMS configuration
+	KMSProvider string // "vault", "aws-kms", "azure-keyvault", "fortanix-sdkms"
+	KMSConfig   *kms.Config
 }
 
 // NewServer creates and starts a new gRPC server with graceful shutdown (uses defaults).
@@ -241,9 +247,35 @@ func NewServerWithConfig(cfg ServerConfig) error {
 		return fmt.Errorf("failed to set vault token: %w", err)
 	}
 
-	// Initialize Vault service
+	// Initialize Vault service for metadata storage
 	// Uses 'recovery-key' and 'kv' to match deploy/compose/vault-init.sh
 	vaultService := NewVaultService(vaultClient, "transit", "recovery-key", "kv")
+
+	// Initialize KMS provider
+	var kmsProvider kms.Provider
+	if cfg.KMSConfig != nil {
+		var err error
+		kmsProvider, err = kms.NewProvider(cfg.KMSConfig)
+		if err != nil {
+			return fmt.Errorf("failed to initialize KMS provider: %w", err)
+		}
+		slog.Info("KMS provider initialized", "provider", cfg.KMSConfig.Provider)
+	} else {
+		// Default to Vault KMS using the existing config
+		kmsProvider, err = kms.NewProvider(&kms.Config{
+			Provider: "vault",
+			Vault: &kms.VaultConfig{
+				Address:     cfg.VaultAddr,
+				Token:       cfg.VaultToken,
+				TransitPath: "transit",
+				KeyName:     "recovery-key",
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to initialize default Vault KMS: %w", err)
+		}
+		slog.Info("KMS provider initialized", "provider", "vault (default)")
+	}
 
 	// Parse PCR policy from config
 	requiredPCRs, err := tpm2.ParsePCRList(cfg.RequiredPCRs)
@@ -267,6 +299,7 @@ func NewServerWithConfig(cfg ServerConfig) error {
 	srv := &server{
 		vaultClient:  vaultClient,
 		vaultService: vaultService,
+		kmsProvider:  kmsProvider,
 		db:           db,
 		pcrPolicy:    pcrPolicy,
 	}
