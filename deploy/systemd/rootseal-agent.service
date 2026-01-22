@@ -1,0 +1,33 @@
+[Unit]
+Description=Cryptor LUKS Agent
+After=network.target
+Wants=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/rootseal-agent daemon
+Restart=always
+RestartSec=10
+User=root
+Group=root
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/rootseal /var/lib/rootseal
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Environment
+Environment=CRYPTOR_CONFIG=/etc/rootseal/agent.yaml
+Environment=CRYPTOR_LOG_LEVEL=info
+
+# Capabilities needed for LUKS operations
+AmbientCapabilities=CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_SYS_ADMIN
+
+[Install]
+WantedBy=multi-user.target

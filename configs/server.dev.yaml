@@ -1,0 +1,33 @@
+server:
+  listen: "0.0.0.0:50051"
+  tls:
+    cert_file: "/etc/rootseal/certs/server.crt"
+    key_file: "/etc/rootseal/certs/server.key"
+    ca_file: "/etc/rootseal/certs/ca.crt"
+    client_auth: true
+
+database:
+  driver: "postgres"
+  dsn: "postgres://rootseal:dev-password@postgres:5432/rootseal?sslmode=disable"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: "5m"
+
+vault:
+  address: "http://vault:8200"
+  token: "dev-root-token"
+  transit:
+    mount_path: "transit"
+    key_name: "recovery-key"
+  kv:
+    mount_path: "kv"
+    path_prefix: "volumes"
+
+logging:
+  level: "debug"
+  format: "json"
+
+features:
+  enable_metrics: true
+  enable_tracing: false
+  audit_log: true

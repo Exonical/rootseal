@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package api;
+
+option go_package = "rootseal/pkg/api";
+
+service LuksManager {
+  rpc Attest(AttestationRequest) returns (AttestationResponse) {};
+  rpc GetKey(KeyRequest) returns (KeyResponse) {};
+  // TPM attestation flow
+  rpc GetNonce(NonceRequest) returns (NonceResponse) {};
+  rpc GetKeyWithAttestation(AttestationKeyRequest) returns (KeyResponse) {};
+}
+
+service AgentService {
+  rpc PostImaging(PostImagingRequest) returns (PostImagingResponse) {};
+}
+
+message AttestationRequest {
+  string role_id = 1;
+  string secret_id = 2;
+}
+
+message AttestationResponse {
+  string token = 1;
+}
+
+message KeyRequest {
+  string device = 1;
+  string volume_uuid = 2;
+  string hostname = 3;
+  int32 version = 4;  // 0 = latest
+}
+
+message KeyResponse {
+  bytes wrapped_key = 1;
+  int32 key_version = 2;
+  string vault_kv_path = 3;
+}
+
+message PostImagingRequest {
+  string device_path = 1;
+  string hostname = 2;
+  string username = 3;
+  string serial = 4;
+  bytes current_password = 5;
+  bytes new_recovery_key = 6;
+  map<string, string> labels = 7;
+  TPMEnrollment tpm_enrollment = 8;  // TPM keys for future attestation
+}
+
+message PostImagingResponse {
+  WrappedKey wrapped = 1;
+  Version version = 2;
+  Volume volume = 3;
+}
+
+message WrappedKey {
+  bytes ciphertext = 1;
+  int32 key_version = 2;
+  string vault_kv_path = 3;
+}
+
+message Version {
+  int32 value = 1;
+}
+
+message Volume {
+  string uuid = 1;
+  string luks_uuid = 2;
+}
+
+// TPM Attestation messages
+message NonceRequest {
+  string volume_uuid = 1;
+}
+
+message NonceResponse {
+  bytes nonce = 1;
+  int64 expires_at = 2;  // Unix timestamp
+}
+
+message AttestationKeyRequest {
+  string volume_uuid = 1;
+  bytes nonce = 2;
+  TPMQuote quote = 3;
+  bytes ak_public = 4;  // Attestation Key public key (for verification)
+}
+
+message TPMQuote {
+  bytes quote = 1;       // TPM2B_ATTEST structure
+  bytes signature = 2;   // TPMT_SIGNATURE structure
+  repeated PCRValue pcrs = 3;
+}
+
+message PCRValue {
+  int32 index = 1;
+  bytes digest = 2;
+}
+
+// TPM enrollment during postimaging
+message TPMEnrollment {
+  bytes ek_public = 1;   // Endorsement Key public
+  bytes ek_cert = 2;     // EK certificate (if available)
+  bytes ak_public = 3;   // Attestation Key public
+  bytes ak_name = 4;     // AK name (for credential activation)
+}

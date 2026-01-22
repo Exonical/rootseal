@@ -1,0 +1,30 @@
+[Unit]
+Description=Cryptor Post-Imaging for %i
+After=network.target cryptsetup.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/bin/rootseal-agent postimaging --device=%i --current-password=- --server=${CRYPTOR_SERVER}
+StandardInput=tty-force
+User=root
+Group=root
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/rootseal /etc/luks2crypt
+PrivateTmp=true
+
+# Environment
+Environment=CRYPTOR_SERVER=rootseal.example.com:443
+EnvironmentFile=-/etc/rootseal/postimaging.env
+
+# Capabilities needed for LUKS operations
+AmbientCapabilities=CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_SYS_ADMIN
+
+[Install]
+WantedBy=multi-user.target

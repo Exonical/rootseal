@@ -1,0 +1,46 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/rootseal-agent
+/rootseal-server
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config
+*.local.yaml
+*.local.yml
+
+# Certs (keep structure but not actual certs)
+certs/*.pem
+certs/*.crt
+certs/*.key
+!certs/.gitkeep
+
+# Temp files
+/tmp/
+*.tmp
+
+# Build artifacts
+/dist/
+/bin/
