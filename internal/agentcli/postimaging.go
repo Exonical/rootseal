@@ -194,44 +194,58 @@ func HandlePostImaging(args []string) error {
 		}
 	}
 
-	// 7. Cache locally
-	log.Println("7. Writing local cache file...")
-	cache := struct {
-		Schema            string            `json:"schema"`
-		Hostname          string            `json:"hostname"`
-		Serial            string            `json:"serial"`
-		VolumeUUID        string            `json:"volume_uuid"`
-		DevicePath        string            `json:"device_path"`
-		KeyVersion        int32             `json:"key_version"`
-		CreatedAt         string            `json:"created_at"`
-		RecoveryKeyB64URL string            `json:"recovery_key_b64url"`
-		CryptorAPI        string            `json:"rootseal_api"`
-		Annotations       map[string]string `json:"annotations"`
-	}{
-		Schema:            "rootseal.v1",
-		Hostname:          sysInfo.Hostname,
-		Serial:            sysInfo.Serial,
-		VolumeUUID:        postImagingRes.GetVolume().GetUuid(),
-		DevicePath:        *device,
-		KeyVersion:        postImagingRes.GetVersion().GetValue(),
-		CreatedAt:         time.Now().UTC().Format(time.RFC3339),
-		RecoveryKeyB64URL: base64.RawURLEncoding.EncodeToString(newKey),
-		CryptorAPI:        "https://" + *serverAddr,
-		Annotations: map[string]string{
-			"source": "postimaging",
-		},
+	// 7. Write LUKS token to device header (stores server/UUID for unlock)
+	log.Println("7. Writing rootseal token to LUKS header...")
+	rootsealToken := &RootsealToken{
+		Type:       "rootseal",
+		Keyslots:   []string{},
+		VolumeUUID: postImagingRes.GetVolume().GetUuid(),
+		Server:     *serverAddr,
+		KeyVersion: int(postImagingRes.GetVersion().GetValue()),
 	}
 
-	if err := WriteJSON0600("/etc/rootseal", "recovery.json", cache); err != nil {
-		return fmt.Errorf("failed to write cache: %w", err)
+	tokenCtx, tokenCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer tokenCancel()
+
+	if err := luksDev.SetToken(tokenCtx, *device, encryption.AnyKeyslot, rootsealToken); err != nil {
+		return fmt.Errorf("failed to write LUKS token: %w", err)
 	}
+	log.Printf("  - Token written to LUKS header (server: %s, volume: %s)", *serverAddr, postImagingRes.GetVolume().GetUuid())
+
+	// 8. Write legacy compat files if requested
 	if *compatLuks2crypt {
+		log.Println("8. Writing legacy cache files...")
+		cache := struct {
+			Schema            string            `json:"schema"`
+			Hostname          string            `json:"hostname"`
+			Serial            string            `json:"serial"`
+			VolumeUUID        string            `json:"volume_uuid"`
+			DevicePath        string            `json:"device_path"`
+			KeyVersion        int32             `json:"key_version"`
+			CreatedAt         string            `json:"created_at"`
+			RecoveryKeyB64URL string            `json:"recovery_key_b64url"`
+			CryptorAPI        string            `json:"rootseal_api"`
+			Annotations       map[string]string `json:"annotations"`
+		}{
+			Schema:            "rootseal.v1",
+			Hostname:          sysInfo.Hostname,
+			Serial:            sysInfo.Serial,
+			VolumeUUID:        postImagingRes.GetVolume().GetUuid(),
+			DevicePath:        *device,
+			KeyVersion:        postImagingRes.GetVersion().GetValue(),
+			CreatedAt:         time.Now().UTC().Format(time.RFC3339),
+			RecoveryKeyB64URL: base64.RawURLEncoding.EncodeToString(newKey),
+			CryptorAPI:        "https://" + *serverAddr,
+			Annotations: map[string]string{
+				"source": "postimaging",
+			},
+		}
 		if err := WriteJSON0600("/etc/luks2crypt", "crypt_recovery_key.json", cache); err != nil {
 			return fmt.Errorf("failed to write compat cache: %w", err)
 		}
 	}
 
-	log.Println("8. Reporting success to control plane...")
+	log.Println("9. Reporting success to control plane...")
 	log.Println("--- Post-Imaging Workflow Complete ---")
 
 	return nil
