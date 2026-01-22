@@ -38,7 +38,7 @@ EOF
 openssl genrsa -out "$CERT_DIR/agent.key" 4096
 
 # Generate agent certificate signing request
-openssl req -subj "/C=US/ST=CA/O=Cryptor Dev/CN=rootseal-agent" -new -key "$CERT_DIR/agent.key" -out "$CERT_DIR/agent.csr"
+openssl req -subj "/C=US/ST=CA/O=Cryptor Dev/CN=rootseal" -new -key "$CERT_DIR/agent.key" -out "$CERT_DIR/agent.csr"
 
 # Generate agent certificate
 openssl x509 -req -in "$CERT_DIR/agent.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" -CAcreateserial -out "$CERT_DIR/agent.crt" -days 365 -sha256

@@ -5,7 +5,7 @@ Wants=network.target
 
 [Service]
 Type=notify
-ExecStart=/usr/local/bin/rootseal-agent daemon
+ExecStart=/usr/local/bin/rootseal daemon
 Restart=always
 RestartSec=10
 User=root

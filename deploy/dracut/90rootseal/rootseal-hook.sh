@@ -58,8 +58,8 @@ unlock_device() {
 
     info "rootseal: Unlocking $dev (volume $volume_uuid) via $server"
 
-    # Call rootseal-agent to get the key and unlock
-    if rootseal-agent unlock \
+    # Call rootseal to get the key and unlock
+    if rootseal unlock \
         --device="$dev" \
         --server="$server" \
         --volume-uuid="$volume_uuid" \

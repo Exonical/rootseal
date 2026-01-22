@@ -6,7 +6,7 @@ Wants=network.target
 [Service]
 Type=oneshot
 RemainAfterExit=no
-ExecStart=/usr/local/bin/rootseal-agent postimaging --device=%i --current-password=- --server=${CRYPTOR_SERVER}
+ExecStart=/usr/local/bin/rootseal postimaging --device=%i --current-password=- --server=${CRYPTOR_SERVER}
 StandardInput=tty-force
 User=root
 Group=root

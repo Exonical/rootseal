@@ -2,8 +2,8 @@
 # dracut module for rootseal NBDE
 
 check() {
-    # Check if rootseal-agent is installed
-    require_binaries rootseal-agent || return 1
+    # Check if rootseal is installed
+    require_binaries rootseal || return 1
     return 0
 }
 
@@ -13,8 +13,8 @@ depends() {
 }
 
 install() {
-    # Install the rootseal-agent binary
-    inst_binary /usr/local/bin/rootseal-agent
+    # Install the rootseal binary
+    inst_binary /usr/local/bin/rootseal
 
     # Install the unlock hook
     inst_hook pre-mount 90 "$moddir/rootseal-hook.sh"
