@@ -122,10 +122,10 @@ func GetTPMInfo(t transport.TPM) (manufacturer string, err error) {
 	if len(props.TPMProperty) > 0 {
 		mfr := props.TPMProperty[0].Value
 		manufacturer = string([]byte{
-			byte(mfr >> 24),
-			byte(mfr >> 16),
-			byte(mfr >> 8),
-			byte(mfr),
+			byte(mfr >> 24), // #nosec G115 -- shift zeroes upper bits, cast is safe
+			byte(mfr >> 16), // #nosec G115
+			byte(mfr >> 8),  // #nosec G115
+			byte(mfr),       // #nosec G115 -- low byte of uint32
 		})
 	}
 

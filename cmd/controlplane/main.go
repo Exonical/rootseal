@@ -18,7 +18,7 @@ func main() {
 	// Get configuration from environment variables
 	dbConnStr := os.Getenv("DATABASE_URL")
 	if dbConnStr == "" {
-		dbConnStr = "postgres://rootseal:rootseal@localhost:5432/rootseal?sslmode=disable"
+		dbConnStr = "postgres://rootseal:rootseal@localhost:5432/rootseal?sslmode=disable" // #nosec G101 -- dev default, not a production credential
 	}
 
 	vaultAddr := os.Getenv("VAULT_ADDR")
@@ -89,7 +89,7 @@ func main() {
 			},
 		}
 	default:
-		log.Fatalf("unknown KMS provider: %s", kmsProvider)
+		log.Fatalf("unknown KMS provider: %q", kmsProvider) // #nosec G706 -- %q escapes control characters
 	}
 
 	cfg := controlplane.ServerConfig{

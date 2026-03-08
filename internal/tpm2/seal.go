@@ -199,10 +199,10 @@ func MarshalSealedBlob(priv tpm2.TPM2BPrivate, pub tpm2.TPM2BPublic) []byte {
 
 	// Simple format: 4 bytes length + private + public
 	result := make([]byte, 4+len(privBytes)+len(pubBytes))
-	result[0] = byte(len(privBytes) >> 24)
-	result[1] = byte(len(privBytes) >> 16)
-	result[2] = byte(len(privBytes) >> 8)
-	result[3] = byte(len(privBytes))
+	result[0] = byte(len(privBytes) >> 24) // #nosec G115 -- big-endian length encoding, shift zeroes upper bits
+	result[1] = byte(len(privBytes) >> 16) // #nosec G115
+	result[2] = byte(len(privBytes) >> 8)  // #nosec G115
+	result[3] = byte(len(privBytes))       // #nosec G115 -- low byte of length
 	copy(result[4:], privBytes)
 	copy(result[4+len(privBytes):], pubBytes)
 
