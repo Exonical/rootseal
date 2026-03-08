@@ -74,18 +74,18 @@ func TestReplaceKeyInPlace_Failure(t *testing.T) {
 }
 
 func TestAddNewAndRemoveOld_OrderAndRemoval(t *testing.T) {
-	mo := &mockOperator{removeOnSlot: 5}
+	mo := &mockOperator{removeOnSlot: 0}
 	newKey := encryption.NewKey(1, []byte{0x0a})
 	auth := encryption.NewKey(1, []byte{0x0b})
 	ctx := context.Background()
-	if err := AddNewAndRemoveOld(ctx, mo, "/dev/fake", newKey, auth); err != nil {
+	if err := AddNewAndRemoveOld(ctx, mo, "/dev/fake", newKey, auth, nil); err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
 	if !mo.addCalled {
 		t.Fatalf("AddKey should be called before removal")
 	}
-	if len(mo.removeCalls) == 0 || mo.removeCalls[len(mo.removeCalls)-1] != 5 {
-		t.Fatalf("expected removal to succeed on slot 5, calls=%v", mo.removeCalls)
+	if len(mo.removeCalls) == 0 || mo.removeCalls[len(mo.removeCalls)-1] != 0 {
+		t.Fatalf("expected removal to succeed on slot 0, calls=%v", mo.removeCalls)
 	}
 }
 
@@ -94,7 +94,7 @@ func TestAddNewAndRemoveOld_NoRemovalMatch(t *testing.T) {
 	newKey := encryption.NewKey(1, []byte{0x0a})
 	auth := encryption.NewKey(1, []byte{0x0b})
 	ctx := context.Background()
-	if err := AddNewAndRemoveOld(ctx, mo, "/dev/fake", newKey, auth); err == nil {
+	if err := AddNewAndRemoveOld(ctx, mo, "/dev/fake", newKey, auth, nil); err == nil {
 		t.Fatalf("expected error, got nil")
 	}
 }

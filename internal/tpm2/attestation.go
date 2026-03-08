@@ -34,10 +34,10 @@ func NewAttestor() (*Attestor, error) {
 // Close releases TPM resources
 func (a *Attestor) Close() error {
 	if a.akHandle != 0 {
-		FlushContext(a.tpm, a.akHandle)
+		_ = FlushContext(a.tpm, a.akHandle)
 	}
 	if a.srkHandle != 0 {
-		FlushContext(a.tpm, a.srkHandle)
+		_ = FlushContext(a.tpm, a.srkHandle)
 	}
 	return a.tpm.Close()
 }
@@ -254,7 +254,7 @@ func (a *Attestor) GenerateQuote(nonce []byte, pcrs []int) (*api.TPMQuote, error
 	apiPCRs := make([]*api.PCRValue, 0, len(pcrValues))
 	for idx, digest := range pcrValues {
 		apiPCRs = append(apiPCRs, &api.PCRValue{
-			Index:  int32(idx),
+			Index:  int32(idx), // #nosec G115 -- PCR index bounded to 0-23 by TPM spec
 			Digest: digest,
 		})
 	}

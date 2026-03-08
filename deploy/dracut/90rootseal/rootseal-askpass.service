@@ -1,0 +1,11 @@
+[Unit]
+Description=Forward Password Requests to Rootseal
+Documentation=man:rootseal(8)
+DefaultDependencies=no
+After=rootseal-askpass.path
+Before=cryptsetup.target
+Conflicts=shutdown.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/rootseal-askpass -l

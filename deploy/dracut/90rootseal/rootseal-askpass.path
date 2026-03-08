@@ -1,0 +1,12 @@
+[Unit]
+Description=Forward Password Requests to Rootseal
+Documentation=man:rootseal(8)
+DefaultDependencies=no
+Before=cryptsetup.target
+
+[Path]
+DirectoryNotEmpty=/run/systemd/ask-password
+MakeDirectory=yes
+
+[Install]
+WantedBy=cryptsetup.target

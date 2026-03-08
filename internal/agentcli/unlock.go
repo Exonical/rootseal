@@ -71,7 +71,7 @@ func HandleUnlock(args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := api.NewLuksManagerClient(conn)
 
@@ -98,7 +98,7 @@ func HandleUnlock(args []string) error {
 	recoveryKey := resp.GetWrappedKey()
 
 	if *keyOnly {
-		os.Stdout.Write(recoveryKey)
+		_, _ = os.Stdout.Write(recoveryKey)
 		return nil
 	}
 
@@ -125,7 +125,7 @@ func HandleUnlock(args []string) error {
 func getKeyWithTPMAttestation(ctx context.Context, client api.LuksManagerClient, volumeUUID, akBlobPath string) (*api.KeyResponse, error) {
 	log.Println("Using TPM attestation for key retrieval")
 
-	akBlob, err := os.ReadFile(akBlobPath)
+	akBlob, err := os.ReadFile(filepath.Clean(akBlobPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read AK blob from %s: %w", akBlobPath, err)
 	}
@@ -134,7 +134,7 @@ func getKeyWithTPMAttestation(ctx context.Context, client api.LuksManagerClient,
 	if err != nil {
 		return nil, fmt.Errorf("failed to open TPM: %w", err)
 	}
-	defer attestor.Close()
+	defer func() { _ = attestor.Close() }()
 
 	if err := attestor.LoadAK(akBlob); err != nil {
 		return nil, fmt.Errorf("failed to load AK: %w", err)

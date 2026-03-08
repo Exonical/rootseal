@@ -57,30 +57,9 @@ func (v *VaultService) WrapKey(ctx context.Context, plaintext []byte) (*EncryptR
 		return nil, fmt.Errorf("ciphertext not found in response")
 	}
 
-	// Handle key_version which may come as float64, int, int32, int64, or json.Number
-	var keyVersion int
-	switch v := resp.Data["key_version"].(type) {
-	case float64:
-		keyVersion = int(v)
-	case float32:
-		keyVersion = int(v)
-	case int:
-		keyVersion = v
-	case int32:
-		keyVersion = int(v)
-	case int64:
-		keyVersion = int(v)
-	case json.Number:
-		i, err := v.Int64()
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse key_version as int: %w", err)
-		}
-		keyVersion = int(i)
-	case nil:
-		// key_version not present, default to 1
-		keyVersion = 1
-	default:
-		return nil, fmt.Errorf("key_version unexpected type %T (value: %v) in response", resp.Data["key_version"], resp.Data["key_version"])
+	keyVersion, err := parseKeyVersion(resp.Data["key_version"])
+	if err != nil {
+		return nil, err
 	}
 
 	return &EncryptResponse{
@@ -126,6 +105,33 @@ func (v *VaultService) StoreKeyMetadata(ctx context.Context, path string, metada
 	}
 
 	return nil
+}
+
+// parseKeyVersion converts the key_version field from a Vault Transit response
+// into an int. Vault may return it as float64, int variants, json.Number, or nil.
+func parseKeyVersion(v interface{}) (int, error) {
+	switch kv := v.(type) {
+	case float64:
+		return int(kv), nil
+	case float32:
+		return int(kv), nil
+	case int:
+		return kv, nil
+	case int32:
+		return int(kv), nil
+	case int64:
+		return int(kv), nil
+	case json.Number:
+		i, err := kv.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse key_version as int: %w", err)
+		}
+		return int(i), nil
+	case nil:
+		return 1, nil
+	default:
+		return 0, fmt.Errorf("key_version unexpected type %T (value: %v) in response", v, v)
+	}
 }
 
 // GetKeyMetadata retrieves key metadata from Vault KV

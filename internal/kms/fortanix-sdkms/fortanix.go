@@ -104,7 +104,7 @@ func (p *Provider) WrapKey(ctx context.Context, plaintext []byte) (*kms.WrapResu
 	if err != nil {
 		return nil, fmt.Errorf("fortanix encrypt request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -140,10 +140,10 @@ func (p *Provider) UnwrapKey(ctx context.Context, wrapped *kms.WrappedKey) ([]by
 	tagLen := 16 // default GCM tag length
 
 	if v, ok := wrapped.Extra["iv_len"]; ok {
-		fmt.Sscanf(v, "%d", &ivLen)
+		_, _ = fmt.Sscanf(v, "%d", &ivLen)
 	}
 	if v, ok := wrapped.Extra["tag_len"]; ok {
-		fmt.Sscanf(v, "%d", &tagLen)
+		_, _ = fmt.Sscanf(v, "%d", &tagLen)
 	}
 
 	// Split combined ciphertext
@@ -182,7 +182,7 @@ func (p *Provider) UnwrapKey(ctx context.Context, wrapped *kms.WrappedKey) ([]by
 	if err != nil {
 		return nil, fmt.Errorf("fortanix decrypt request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)

@@ -27,15 +27,43 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// DBStore is the subset of *DB methods used by server handlers.
+type DBStore interface {
+	GetVolumeByUUID(ctx context.Context, volumeUUID string) (*Volume, error)
+	GetKeyVersion(ctx context.Context, volumeID uuid.UUID, version int) (*KeyVersion, error)
+	CreateNonce(ctx context.Context, volumeID uuid.UUID, nonce []byte) error
+	ValidateAndConsumeNonce(ctx context.Context, volumeID uuid.UUID, nonce []byte) error
+	GetTPMEnrollment(ctx context.Context, volumeID uuid.UUID) (*TPMEnrollment, error)
+	UpsertAgent(ctx context.Context, hostname, serial string, labels json.RawMessage) (*Agent, error)
+	GetVolumeByDevicePath(ctx context.Context, agentID uuid.UUID, devicePath string) (*Volume, error)
+	GetLatestKeyVersion(ctx context.Context, volumeID uuid.UUID) (*KeyVersion, error)
+	UpsertVolume(ctx context.Context, agentID uuid.UUID, devicePath, volumeUUID string) (*Volume, error)
+	CreateKeyVersion(ctx context.Context, volumeID uuid.UUID, version int, vaultKeyID, wrappedKey string) (*KeyVersion, error)
+	CreateTPMEnrollment(ctx context.Context, volumeID uuid.UUID, ekPublic, ekCert, akPublic, akName []byte) (*TPMEnrollment, error)
+}
+
+// KeyStore wraps key encryption/decryption operations.
+type KeyStore interface {
+	WrapKey(ctx context.Context, plaintext []byte) (*EncryptResponse, error)
+	UnwrapKey(ctx context.Context, ciphertext string) ([]byte, error)
+	StoreKeyMetadata(ctx context.Context, path string, metadata map[string]interface{}) error
+}
+
+// QuoteVerifier verifies TPM quotes during attestation.
+type QuoteVerifier interface {
+	VerifyQuote(akPublicBytes []byte, nonce []byte, quote *api.TPMQuote) error
+}
+
 // server is used to implement api.LuksManagerServer.
 type server struct {
 	api.UnimplementedLuksManagerServer
 	api.UnimplementedAgentServiceServer
-	vaultClient  *vault.Client
-	vaultService *VaultService // Legacy, kept for metadata storage
-	kmsProvider  kms.Provider
-	db           *DB
-	pcrPolicy    *tpm2.PCRPolicy
+	vaultClient   *vault.Client
+	vaultService  KeyStore
+	kmsProvider   kms.Provider
+	db            DBStore
+	pcrPolicy     *tpm2.PCRPolicy
+	quoteVerifier QuoteVerifier
 }
 
 // Attest implements api.LuksManagerServer
@@ -88,7 +116,7 @@ func (s *server) GetKey(ctx context.Context, in *api.KeyRequest) (*api.KeyRespon
 
 	return &api.KeyResponse{
 		WrappedKey:  plaintext,
-		KeyVersion:  int32(keyVersion.Version),
+		KeyVersion:  int32(keyVersion.Version), // #nosec G115 -- key version is a small DB-incremented integer
 		VaultKvPath: keyVersion.VaultKeyID,
 	}, nil
 }
@@ -159,8 +187,7 @@ func (s *server) GetKeyWithAttestation(ctx context.Context, in *api.AttestationK
 	}
 
 	// Verify the TPM quote
-	verifier := tpm2.NewVerifier()
-	if err := verifier.VerifyQuote(enrollment.AKPublic, in.GetNonce(), in.GetQuote()); err != nil {
+	if err := s.quoteVerifier.VerifyQuote(enrollment.AKPublic, in.GetNonce(), in.GetQuote()); err != nil {
 		slog.Warn("TPM quote verification failed", "volume_uuid", volumeUUID, "error", err)
 		return nil, status.Errorf(codes.Unauthenticated, "TPM attestation failed: %v", err)
 	}
@@ -192,7 +219,7 @@ func (s *server) GetKeyWithAttestation(ctx context.Context, in *api.AttestationK
 
 	return &api.KeyResponse{
 		WrappedKey:  plaintext,
-		KeyVersion:  int32(keyVersion.Version),
+		KeyVersion:  int32(keyVersion.Version), // #nosec G115 -- key version is a small DB-incremented integer
 		VaultKvPath: keyVersion.VaultKeyID,
 	}, nil
 }
@@ -285,7 +312,7 @@ func NewServerWithConfig(cfg ServerConfig) error {
 	pcrPolicy := tpm2.NewPCRPolicy(requiredPCRs, !cfg.EnforcePCRValues)
 	slog.Info("TPM PCR policy configured", "required_pcrs", requiredPCRs, "enforce_values", cfg.EnforcePCRValues)
 
-	lis, err := net.Listen("tcp", ":50051")
+	lis, err := net.Listen("tcp", ":50051") // #nosec G102 -- server intentionally binds to all interfaces
 	if err != nil {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
@@ -297,11 +324,12 @@ func NewServerWithConfig(cfg ServerConfig) error {
 		),
 	)
 	srv := &server{
-		vaultClient:  vaultClient,
-		vaultService: vaultService,
-		kmsProvider:  kmsProvider,
-		db:           db,
-		pcrPolicy:    pcrPolicy,
+		vaultClient:   vaultClient,
+		vaultService:  vaultService,
+		kmsProvider:   kmsProvider,
+		db:            db,
+		pcrPolicy:     pcrPolicy,
+		quoteVerifier: tpm2.NewVerifier(),
 	}
 	api.RegisterLuksManagerServer(s, srv)
 	api.RegisterAgentServiceServer(s, srv)
@@ -374,7 +402,7 @@ func (s *server) PostImaging(ctx context.Context, in *api.PostImagingRequest) (*
 	}
 
 	var volume *Volume
-	var nextVersion int = 1
+	nextVersion := 1
 
 	if existingVolume != nil {
 		// Volume exists, check latest key version for idempotency
@@ -454,11 +482,11 @@ func (s *server) PostImaging(ctx context.Context, in *api.PostImagingRequest) (*
 	return &api.PostImagingResponse{
 		Wrapped: &api.WrappedKey{
 			Ciphertext:  ciphertextBytes,
-			KeyVersion:  int32(encryptResp.KeyVersion),
+			KeyVersion:  int32(encryptResp.KeyVersion), // #nosec G115 -- key version from Vault, bounded to small integer
 			VaultKvPath: kvPath,
 		},
 		Version: &api.Version{
-			Value: int32(nextVersion),
+			Value: int32(nextVersion), // #nosec G115 -- nextVersion is a DB-incremented counter, bounded well below int32 max
 		},
 		Volume: &api.Volume{
 			Uuid:     volume.UUID,

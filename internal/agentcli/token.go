@@ -17,6 +17,7 @@ type RootsealToken struct {
 	VolumeUUID string   `json:"volume_uuid"`
 	Server     string   `json:"server"`
 	KeyVersion int      `json:"key_version,omitempty"`
+	SealedKey  string   `json:"sealed_key,omitempty"` // Base64-encoded TPM-sealed recovery key
 }
 
 // Bytes implements token.Token interface

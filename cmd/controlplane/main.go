@@ -28,7 +28,7 @@ func main() {
 
 	vaultToken := os.Getenv("VAULT_TOKEN")
 	if vaultToken == "" {
-		vaultToken = "dev-root-token"
+		log.Fatal("VAULT_TOKEN environment variable is required")
 	}
 
 	// TPM PCR policy configuration

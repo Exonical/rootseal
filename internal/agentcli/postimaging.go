@@ -31,7 +31,7 @@ func HandlePostImaging(args []string) error {
 	device := fs.String("device", "", "Path to the LUKS device (required)")
 	currentPassword := fs.String("current-password", "", "Current LUKS password ('-' to prompt)")
 	serverAddr := fs.String("server", "", "Control plane server address (host:port)")
-	noKillOld := fs.Bool("no-kill-old", false, "Do not remove the old key slot after adding the new one")
+	killOld := fs.Bool("kill-old", false, "Remove the old key slot after adding the new one (default: keep old slot for safety)")
 	replaceInPlace := fs.Bool("replace-in-place", false, "Replace the old passphrase in-place (luksChangeKey) instead of add+remove")
 	compatLuks2crypt := fs.Bool("compat-luks2crypt", false, "Also write legacy cache file at /etc/luks2crypt/crypt_recovery_key.json")
 	enrollTPM := fs.Bool("tpm", false, "Enroll TPM for attestation-based unlock")
@@ -88,12 +88,15 @@ func HandlePostImaging(args []string) error {
 	}
 	log.Println("  - Passphrase verified.")
 
-	// 3. Generate new recovery key
+	// 3. Generate new recovery key (printable base64 to avoid binary handling issues)
 	log.Println("3. Generating new recovery key...")
-	newKey := make([]byte, 32)
-	if _, err := rand.Read(newKey); err != nil {
+	rawKey := make([]byte, 32)
+	if _, err := rand.Read(rawKey); err != nil {
 		return fmt.Errorf("failed to generate new key: %w", err)
 	}
+	// Use base64 encoding to create a printable passphrase (like Clevis does)
+	newKey := []byte(base64.RawURLEncoding.EncodeToString(rawKey))
+	SecureZero(rawKey)
 	defer SecureZero(newKey)
 
 	// 4. Escrow key to control plane
@@ -103,18 +106,20 @@ func HandlePostImaging(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	c := api.NewAgentServiceClient(conn)
 
 	// Optionally enroll TPM for attestation-based unlock
 	var tpmEnrollment *api.TPMEnrollment
+	var attestor *tpm2.Attestor
 	if *enrollTPM {
 		log.Println("  - Enrolling TPM for attestation...")
-		attestor, err := tpm2.NewAttestor()
+		var err error
+		attestor, err = tpm2.NewAttestor()
 		if err != nil {
 			return fmt.Errorf("failed to open TPM: %w", err)
 		}
-		defer attestor.Close()
+		defer func() { _ = attestor.Close() }()
 
 		if err := attestor.CreateAK(); err != nil {
 			return fmt.Errorf("failed to create AK: %w", err)
@@ -172,36 +177,49 @@ func HandlePostImaging(args []string) error {
 	defer luksKeyCancel()
 
 	if *replaceInPlace {
-		log.Println("5. Replacing old key in-place (luksChangeKey)...")
-		if err := agent.ReplaceKeyInPlace(luksKeyCtx, luksDev, *device, authKey, newKeyObj); err != nil {
+		log.Println("5. Replacing old key (add new + remove old)...")
+		if err := agent.AddNewAndRemoveOld(luksKeyCtx, luksDev, *device, newKeyObj, authKey, nil); err != nil {
 			return err
 		}
-		log.Println("  - Old key replaced in-place.")
+		log.Println("  - Old key replaced.")
 	} else {
-		if *noKillOld {
-			log.Println("5. Installing new key into LUKS slot...")
-			if err := luksDev.AddKey(luksKeyCtx, *device, authKey, newKeyObj); err != nil {
-				return fmt.Errorf("failed to add new key to LUKS device: %w", err)
-			}
-			log.Println("  - New recovery key added.")
-			log.Println("6. Skipping old key slot removal (--no-kill-old)")
-		} else {
-			log.Println("5-6. Installing new key and removing old...")
+		if *killOld {
+			log.Println("5-6. Installing new key and removing old (--kill-old)...")
 			if err := agent.AddNewAndRemoveOld(luksKeyCtx, luksDev, *device, newKeyObj, authKey, nil); err != nil {
 				return err
 			}
 			log.Println("  - New recovery key added and old removed.")
+		} else {
+			log.Println("5. Installing new key into LUKS slot (keeping old for safety)...")
+			if err := luksDev.AddKey(luksKeyCtx, *device, authKey, newKeyObj); err != nil {
+				return fmt.Errorf("failed to add new key to LUKS device: %w", err)
+			}
+			log.Println("  - New recovery key added.")
+			log.Println("6. Old key slot preserved (use --kill-old to remove)")
 		}
 	}
 
-	// 7. Write LUKS token to device header (stores server/UUID for unlock)
+	// 7. Seal recovery key with TPM and write LUKS token
 	log.Println("7. Writing rootseal token to LUKS header...")
+
+	var sealedKeyB64 string
+	if *enrollTPM {
+		log.Println("  - Sealing recovery key with TPM...")
+		sealedKey, err := attestor.Seal(newKey, nil) // No PCR binding for now - PCRs change between OS and initramfs
+		if err != nil {
+			return fmt.Errorf("failed to seal recovery key with TPM: %w", err)
+		}
+		sealedKeyB64 = base64.StdEncoding.EncodeToString(sealedKey)
+		log.Println("  - Recovery key sealed with TPM (bound to PCRs)")
+	}
+
 	rootsealToken := &RootsealToken{
 		Type:       "rootseal",
 		Keyslots:   []string{},
 		VolumeUUID: postImagingRes.GetVolume().GetUuid(),
 		Server:     *serverAddr,
 		KeyVersion: int(postImagingRes.GetVersion().GetValue()),
+		SealedKey:  sealedKeyB64,
 	}
 
 	tokenCtx, tokenCancel := context.WithTimeout(context.Background(), 30*time.Second)

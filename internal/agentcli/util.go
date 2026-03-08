@@ -44,12 +44,12 @@ func GatherSystemInfo(devicePath string) (*SystemInfo, error) {
 		log.Printf("Warning: failed to open block device %s: %v", devicePath, err)
 		info.Serial = ""
 	} else {
-		defer dev.Close()
+		defer func() { _ = dev.Close() }()
 
 		// Try to get the whole disk for partition devices (e.g., /dev/sda1 -> /dev/sda)
 		wholeDisk, err := dev.GetWholeDisk()
 		if err == nil && wholeDisk != nil {
-			defer wholeDisk.Close()
+			defer func() { _ = wholeDisk.Close() }()
 			dev = wholeDisk
 		}
 

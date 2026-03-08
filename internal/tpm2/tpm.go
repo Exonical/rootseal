@@ -8,9 +8,8 @@ import (
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
+	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 )
-
-const defaultTPMPath = "/dev/tpmrm0"
 
 // OpenTPM opens a connection to the TPM device
 func OpenTPM() (transport.TPMCloser, error) {
@@ -24,7 +23,7 @@ func OpenTPM() (transport.TPMCloser, error) {
 			continue
 		}
 
-		t, err := transport.OpenTPM(path)
+		t, err := linuxtpm.Open(path)
 		if err != nil {
 			lastErr = err
 			continue
@@ -96,7 +95,7 @@ func createPCRSelector(pcrs []int) ([]byte, error) {
 		if n >= 8*sizeOfPCRSelect {
 			return nil, fmt.Errorf("PCR index %d is out of range", n)
 		}
-		mask[n>>3] |= 1 << (n & 0x7)
+		mask[n>>3] |= 1 << (n & 0x7) // #nosec G602 -- n < 8*sizeOfPCRSelect (24) is checked above, so n>>3 < 3
 	}
 
 	return mask, nil
