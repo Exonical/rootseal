@@ -141,11 +141,11 @@ jobs:
             -o bin/rootseal-controlplane-fips-linux-amd64 \
             ./cmd/controlplane
 
-      - name: Verify BoringCrypto symbols
+      - name: Verify BoringCrypto build metadata
         run: |
-          nm bin/rootseal-fips-linux-amd64 | grep -q "_Cfunc__goboringcrypto" && \
+          go version -m bin/rootseal-fips-linux-amd64 | grep -q "boringcrypto" && \
             echo "rootseal-fips: BoringCrypto OK" || \
-            (echo "ERROR: BoringCrypto symbols missing" && exit 1)
+            (echo "ERROR: BoringCrypto not found in build metadata" && exit 1)
 
       - name: Upload FIPS binaries
         uses: actions/upload-artifact@v4
