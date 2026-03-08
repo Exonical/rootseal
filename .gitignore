@@ -40,6 +40,7 @@ certs/*.key
 # Temp files
 /tmp/
 *.tmp
+vendor/
 
 # Build artifacts
 /dist/
