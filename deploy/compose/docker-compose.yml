@@ -54,6 +54,13 @@ services:
       DATABASE_URL: "postgres://rootseal:dev-password@postgres:5432/rootseal?sslmode=disable"
       VAULT_ADDR: "http://vault:8200"
       VAULT_TOKEN: "dev-root-token"
+      # TLS configuration (mTLS)
+      TLS_CERT_FILE: "/etc/rootseal/certs/server.crt"
+      TLS_KEY_FILE: "/etc/rootseal/certs/server.key"
+      TLS_CA_FILE: "/etc/rootseal/certs/ca.crt"
+      TLS_CLIENT_AUTH: "true"
+      # Debug mode (enables gRPC reflection — disable in production)
+      ROOTSEAL_DEBUG: "true"
       # TPM PCR policy configuration
       TPM_REQUIRED_PCRS: "0,2,7"  # PCRs required in attestation quotes
       TPM_ENFORCE_PCR_VALUES: "false"  # Set to "true" to enforce specific PCR values
