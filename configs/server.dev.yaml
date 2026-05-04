@@ -26,7 +26,9 @@ database:
 
 vault:
   address: "http://vault:8200"
-  token: "dev-root-token"
+  token: "dev-root-token"            # Dev only; prefer AppRole in production
+  # role_id: ""                      # VAULT_ROLE_ID (preferred over static token)
+  # secret_id: ""                    # VAULT_SECRET_ID
   transit:
     mount_path: "transit"
     key_name: "recovery-key"

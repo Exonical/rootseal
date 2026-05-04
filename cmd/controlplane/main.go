@@ -27,8 +27,10 @@ func main() {
 	}
 
 	vaultToken := os.Getenv("VAULT_TOKEN")
-	if vaultToken == "" {
-		log.Fatal("VAULT_TOKEN environment variable is required")
+	vaultRoleID := os.Getenv("VAULT_ROLE_ID")
+	vaultSecretID := os.Getenv("VAULT_SECRET_ID")
+	if vaultRoleID == "" && vaultToken == "" {
+		log.Fatal("vault auth required: set VAULT_ROLE_ID+VAULT_SECRET_ID or VAULT_TOKEN")
 	}
 
 	// TPM PCR policy configuration
@@ -112,6 +114,8 @@ func main() {
 		DatabaseURL:      dbConnStr,
 		VaultAddr:        vaultAddr,
 		VaultToken:       vaultToken,
+		VaultRoleID:      vaultRoleID,
+		VaultSecretID:    vaultSecretID,
 		RequiredPCRs:     requiredPCRs,
 		EnforcePCRValues: enforcePCRValues,
 		EKCertCAFile:     os.Getenv("EK_CERT_CA_FILE"),
