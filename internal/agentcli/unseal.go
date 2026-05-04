@@ -46,8 +46,9 @@ func HandleUnseal(args []string) error {
 	}
 	defer func() { _ = attestor.Close() }()
 
-	// Unseal the key using TPM (no PCR binding)
-	key, err := attestor.Unseal(sealedKey, nil)
+	// Unseal the key using the same PCR binding that was used during sealing.
+	// If the token has no seal_pcrs field (legacy enrollment), fall back to nil.
+	key, err := attestor.Unseal(sealedKey, token.SealPCRs)
 	if err != nil {
 		return fmt.Errorf("failed to unseal key: %w", err)
 	}

@@ -41,6 +41,7 @@ func HandlePostImaging(args []string) error {
 	keyFile := fs.String("key", "/etc/rootseal/certs/agent.key", "Client TLS private key")
 	caFile := fs.String("ca", "/etc/rootseal/certs/ca.crt", "CA certificate for server verification")
 	insecureMode := fs.Bool("insecure", false, "Disable TLS (dev only)")
+	sealPCRs := fs.String("seal-pcrs", "7", "Comma-separated PCR indices to bind sealed key to (default: 7 = Secure Boot state)")
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("failed parsing flags: %w", err)
@@ -221,13 +222,23 @@ func HandlePostImaging(args []string) error {
 
 	var sealedKeyB64 string
 	if *enrollTPM {
-		log.Println("  - Sealing recovery key with TPM...")
-		sealedKey, err := attestor.Seal(newKey, nil) // No PCR binding for now - PCRs change between OS and initramfs
+		pcrs, err := tpm2.ParsePCRList(*sealPCRs)
+		if err != nil {
+			return fmt.Errorf("invalid --seal-pcrs: %w", err)
+		}
+		log.Printf("  - Sealing recovery key with TPM (PCRs: %v)...", pcrs)
+		sealedKey, err := attestor.Seal(newKey, pcrs)
 		if err != nil {
 			return fmt.Errorf("failed to seal recovery key with TPM: %w", err)
 		}
 		sealedKeyB64 = base64.StdEncoding.EncodeToString(sealedKey)
-		log.Println("  - Recovery key sealed with TPM (bound to PCRs)")
+		log.Printf("  - Recovery key sealed with TPM (bound to PCRs %v)", pcrs)
+	}
+
+	var tokenSealPCRs []int
+	if *enrollTPM {
+		parsed, _ := tpm2.ParsePCRList(*sealPCRs)
+		tokenSealPCRs = parsed
 	}
 
 	rootsealToken := &RootsealToken{
@@ -237,6 +248,7 @@ func HandlePostImaging(args []string) error {
 		Server:     *serverAddr,
 		KeyVersion: int(postImagingRes.GetVersion().GetValue()),
 		SealedKey:  sealedKeyB64,
+		SealPCRs:   tokenSealPCRs,
 	}
 
 	tokenCtx, tokenCancel := context.WithTimeout(context.Background(), 30*time.Second)

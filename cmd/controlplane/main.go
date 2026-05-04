@@ -114,6 +114,8 @@ func main() {
 		VaultToken:       vaultToken,
 		RequiredPCRs:     requiredPCRs,
 		EnforcePCRValues: enforcePCRValues,
+		EKCertCAFile:     os.Getenv("EK_CERT_CA_FILE"),
+		EKVerifyStrict:   os.Getenv("EK_VERIFY_STRICT") == "true",
 		KMSProvider:      kmsProvider,
 		KMSConfig:        kmsCfg,
 		TLS:              tlsCfg,
