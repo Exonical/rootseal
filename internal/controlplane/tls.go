@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"google.golang.org/grpc/credentials"
 )
@@ -32,7 +33,7 @@ func NewServerTransportCredentials(cfg TLSConfig) (credentials.TransportCredenti
 	}
 
 	if cfg.CAFile != "" {
-		caPEM, err := os.ReadFile(cfg.CAFile)
+		caPEM, err := os.ReadFile(filepath.Clean(cfg.CAFile)) // #nosec G304 -- path from operator-controlled config
 		if err != nil {
 			return nil, fmt.Errorf("failed to read CA certificate: %w", err)
 		}
@@ -57,7 +58,7 @@ func NewClientTransportCredentials(certFile, keyFile, caFile string) (credential
 		return nil, fmt.Errorf("failed to load client certificate: %w", err)
 	}
 
-	caPEM, err := os.ReadFile(caFile)
+	caPEM, err := os.ReadFile(filepath.Clean(caFile)) // #nosec G304 -- path from operator-controlled CLI flag
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
 	}
