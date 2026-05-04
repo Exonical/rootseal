@@ -53,7 +53,9 @@ services:
     environment:
       DATABASE_URL: "postgres://rootseal:dev-password@postgres:5432/rootseal?sslmode=disable"
       VAULT_ADDR: "http://vault:8200"
-      VAULT_TOKEN: "dev-root-token"
+      VAULT_TOKEN: "dev-root-token"  # Dev only; use VAULT_ROLE_ID/VAULT_SECRET_ID in production
+      # VAULT_ROLE_ID: ""    # AppRole auth (preferred over static token)
+      # VAULT_SECRET_ID: ""
       # TLS configuration (mTLS)
       TLS_CERT_FILE: "/etc/rootseal/certs/server.crt"
       TLS_KEY_FILE: "/etc/rootseal/certs/server.key"
@@ -64,6 +66,8 @@ services:
       # TPM PCR policy configuration
       TPM_REQUIRED_PCRS: "0,2,7"  # PCRs required in attestation quotes
       TPM_ENFORCE_PCR_VALUES: "false"  # Set to "true" to enforce specific PCR values
+      # EK_CERT_CA_FILE: "/etc/rootseal/certs/tpm-ca.pem"  # TPM manufacturer CA bundle
+      # EK_VERIFY_STRICT: "false"  # Set to "true" to reject enrollments without valid EK cert
       # KMS provider configuration
       # KMS_PROVIDER: "vault" (default), "aws-kms", "azure-keyvault", "fortanix-sdkms"
       KMS_PROVIDER: "vault"

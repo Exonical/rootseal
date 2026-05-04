@@ -30,7 +30,7 @@ import (
 func HandlePostImaging(args []string) error {
 	fs := flag.NewFlagSet("postimaging", flag.ExitOnError)
 	device := fs.String("device", "", "Path to the LUKS device (required)")
-	currentPassword := fs.String("current-password", "", "Current LUKS password ('-' to prompt)")
+	currentPassword := fs.String("current-password", "", "Current LUKS password (omit or '-' to prompt, or set ROOTSEAL_LUKS_PASSWORD env var)")
 	serverAddr := fs.String("server", "", "Control plane server address (host:port)")
 	killOld := fs.Bool("kill-old", false, "Remove the old key slot after adding the new one (default: keep old slot for safety)")
 	replaceInPlace := fs.Bool("replace-in-place", false, "Replace the old passphrase in-place (luksChangeKey) instead of add+remove")
@@ -47,7 +47,7 @@ func HandlePostImaging(args []string) error {
 		return fmt.Errorf("failed parsing flags: %w", err)
 	}
 
-	if *device == "" || *currentPassword == "" || *serverAddr == "" {
+	if *device == "" || *serverAddr == "" {
 		fs.Usage()
 		return errors.New("missing required flags for postimaging command")
 	}
@@ -63,9 +63,15 @@ func HandlePostImaging(args []string) error {
 	log.Printf("  - Hostname: %s, Username: %s, Serial: %s", sysInfo.Hostname, sysInfo.Username, sysInfo.Serial)
 
 	// 2. Obtain current passphrase
+	// Priority: --current-password flag > ROOTSEAL_LUKS_PASSWORD env > interactive prompt
 	log.Println("2. Obtaining and verifying current passphrase...")
 	var currentPass []byte
-	if *currentPassword == "-" {
+	switch {
+	case *currentPassword != "" && *currentPassword != "-":
+		currentPass = []byte(*currentPassword)
+	case os.Getenv("ROOTSEAL_LUKS_PASSWORD") != "":
+		currentPass = []byte(os.Getenv("ROOTSEAL_LUKS_PASSWORD"))
+	default:
 		fmt.Fprint(os.Stderr, "Enter current LUKS password: ")
 		pass, err := term.ReadPassword(int(syscall.Stdin))
 		if err != nil {
@@ -73,8 +79,6 @@ func HandlePostImaging(args []string) error {
 		}
 		fmt.Fprintln(os.Stderr)
 		currentPass = pass
-	} else {
-		currentPass = []byte(*currentPassword)
 	}
 	defer SecureZero(currentPass)
 
@@ -261,28 +265,27 @@ func HandlePostImaging(args []string) error {
 
 	// 8. Write legacy compat files if requested
 	if *compatLuks2crypt {
-		log.Println("8. Writing legacy cache files...")
+		log.Println("WARNING: --compat-luks2crypt is deprecated and will be removed in a future release")
+		log.Println("8. Writing legacy cache files (without plaintext key)...")
 		cache := struct {
-			Schema            string            `json:"schema"`
-			Hostname          string            `json:"hostname"`
-			Serial            string            `json:"serial"`
-			VolumeUUID        string            `json:"volume_uuid"`
-			DevicePath        string            `json:"device_path"`
-			KeyVersion        int32             `json:"key_version"`
-			CreatedAt         string            `json:"created_at"`
-			RecoveryKeyB64URL string            `json:"recovery_key_b64url"`
-			CryptorAPI        string            `json:"rootseal_api"`
-			Annotations       map[string]string `json:"annotations"`
+			Schema      string            `json:"schema"`
+			Hostname    string            `json:"hostname"`
+			Serial      string            `json:"serial"`
+			VolumeUUID  string            `json:"volume_uuid"`
+			DevicePath  string            `json:"device_path"`
+			KeyVersion  int32             `json:"key_version"`
+			CreatedAt   string            `json:"created_at"`
+			CryptorAPI  string            `json:"rootseal_api"`
+			Annotations map[string]string `json:"annotations"`
 		}{
-			Schema:            "rootseal.v1",
-			Hostname:          sysInfo.Hostname,
-			Serial:            sysInfo.Serial,
-			VolumeUUID:        postImagingRes.GetVolume().GetUuid(),
-			DevicePath:        *device,
-			KeyVersion:        postImagingRes.GetVersion().GetValue(),
-			CreatedAt:         time.Now().UTC().Format(time.RFC3339),
-			RecoveryKeyB64URL: base64.RawURLEncoding.EncodeToString(newKey),
-			CryptorAPI:        "https://" + *serverAddr,
+			Schema:     "rootseal.v1",
+			Hostname:   sysInfo.Hostname,
+			Serial:     sysInfo.Serial,
+			VolumeUUID: postImagingRes.GetVolume().GetUuid(),
+			DevicePath: *device,
+			KeyVersion: postImagingRes.GetVersion().GetValue(),
+			CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+			CryptorAPI: "https://" + *serverAddr,
 			Annotations: map[string]string{
 				"source": "postimaging",
 			},

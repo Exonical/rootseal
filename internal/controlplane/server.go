@@ -251,7 +251,9 @@ func (s *server) GetKeyWithAttestation(ctx context.Context, in *api.AttestationK
 type ServerConfig struct {
 	DatabaseURL      string
 	VaultAddr        string
-	VaultToken       string
+	VaultToken       string // Static token (dev only; prefer AppRole)
+	VaultRoleID      string // AppRole role_id (preferred over static token)
+	VaultSecretID    string // AppRole secret_id
 	RequiredPCRs     string // Comma-separated list of PCR indices (e.g., "0,2,7,11")
 	EnforcePCRValues bool   // If true, reject quotes with unexpected PCR values
 
@@ -302,9 +304,29 @@ func NewServerWithConfig(cfg ServerConfig) error {
 		return fmt.Errorf("failed to initialize vault client: %w", err)
 	}
 
-	// Set Vault token
-	if err := vaultClient.SetToken(cfg.VaultToken); err != nil {
-		return fmt.Errorf("failed to set vault token: %w", err)
+	// Authenticate to Vault: prefer AppRole, fall back to static token
+	if cfg.VaultRoleID != "" {
+		resp, err := vaultClient.Auth.AppRoleLogin(context.Background(), schema.AppRoleLoginRequest{
+			RoleId:   cfg.VaultRoleID,
+			SecretId: cfg.VaultSecretID,
+		})
+		if err != nil {
+			return fmt.Errorf("vault AppRole login failed: %w", err)
+		}
+		if err := vaultClient.SetToken(resp.Auth.ClientToken); err != nil {
+			return fmt.Errorf("failed to set vault token from AppRole: %w", err)
+		}
+		slog.Info("vault authenticated via AppRole")
+
+		// Renew the token periodically in the background
+		go renewVaultToken(vaultClient, resp.Auth.LeaseDuration)
+	} else if cfg.VaultToken != "" {
+		if err := vaultClient.SetToken(cfg.VaultToken); err != nil {
+			return fmt.Errorf("failed to set vault token: %w", err)
+		}
+		slog.Warn("vault authenticated via static token (prefer VAULT_ROLE_ID/VAULT_SECRET_ID)")
+	} else {
+		return fmt.Errorf("vault auth required: set VAULT_ROLE_ID+VAULT_SECRET_ID or VAULT_TOKEN")
 	}
 
 	// Initialize Vault service for metadata storage
@@ -427,8 +449,49 @@ func NewServerWithConfig(cfg ServerConfig) error {
 		}
 	}()
 
+	// Start background nonce cleanup (every 5 minutes)
+	go startNonceCleanup(db, 5*time.Minute)
+
 	slog.Info("server listening", "address", lis.Addr())
 	return s.Serve(lis)
+}
+
+// renewVaultToken periodically renews the Vault token before it expires.
+func renewVaultToken(client *vault.Client, leaseDurationSec int) {
+	// Renew at half the lease duration to avoid last-minute races
+	renewInterval := time.Duration(leaseDurationSec) * time.Second / 2
+	if renewInterval < 30*time.Second {
+		renewInterval = 30 * time.Second
+	}
+
+	ticker := time.NewTicker(renewInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		resp, err := client.Auth.TokenRenewSelf(context.Background(), schema.TokenRenewSelfRequest{})
+		if err != nil {
+			slog.Error("failed to renew vault token", "error", err)
+			continue
+		}
+		slog.Info("vault token renewed", "lease_duration", resp.Auth.LeaseDuration)
+	}
+}
+
+// startNonceCleanup runs CleanupExpiredNonces periodically.
+func startNonceCleanup(db *DB, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		deleted, err := db.CleanupExpiredNonces(ctx)
+		cancel()
+		if err != nil {
+			slog.Error("nonce cleanup failed", "error", err)
+		} else if deleted > 0 {
+			slog.Info("expired nonces cleaned up", "count", deleted)
+		}
+	}
 }
 
 // PostImaging implements api.AgentServiceServer

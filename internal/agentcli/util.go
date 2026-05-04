@@ -80,11 +80,11 @@ func GatherSystemInfo(devicePath string) (*SystemInfo, error) {
 	return info, nil
 }
 
-// SecureZero wipes a byte slice
+// SecureZero wipes a byte slice. Uses the clear() builtin (Go 1.21+)
+// which the compiler guarantees will not be optimized away, unlike a
+// manual loop that a dead-store-elimination pass could remove.
 func SecureZero(s []byte) {
-	for i := range s {
-		s[i] = 0
-	}
+	clear(s)
 }
 
 // WriteJSON0600 writes JSON to a file with 0600 permissions
