@@ -1,8 +1,10 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -58,12 +60,14 @@ type QuoteVerifier interface {
 type server struct {
 	api.UnimplementedLuksManagerServer
 	api.UnimplementedAgentServiceServer
-	vaultClient   *vault.Client
-	vaultService  KeyStore
-	kmsProvider   kms.Provider
-	db            DBStore
-	pcrPolicy     *tpm2.PCRPolicy
-	quoteVerifier QuoteVerifier
+	vaultClient    *vault.Client
+	vaultService   KeyStore
+	kmsProvider    kms.Provider
+	db             DBStore
+	pcrPolicy      *tpm2.PCRPolicy
+	quoteVerifier  QuoteVerifier
+	ekTrustStore   *x509.CertPool // Trusted TPM manufacturer CA certs for EK verification
+	ekVerifyStrict bool           // If true, reject enrollments without a valid EK cert
 }
 
 // Attest implements api.LuksManagerServer.
@@ -191,13 +195,21 @@ func (s *server) GetKeyWithAttestation(ctx context.Context, in *api.AttestationK
 		return nil, status.Errorf(codes.FailedPrecondition, "no TPM enrollment found for volume")
 	}
 
+	// Verify the request's AK public matches the enrolled AK
+	if reqAK := in.GetAkPublic(); len(reqAK) > 0 {
+		if !bytes.Equal(reqAK, enrollment.AKPublic) {
+			slog.Warn("AK public key mismatch", "volume_uuid", volumeUUID)
+			return nil, status.Errorf(codes.Unauthenticated, "AK public key does not match enrollment")
+		}
+	}
+
 	// Validate and consume the nonce (prevents replay attacks)
 	if err := s.db.ValidateAndConsumeNonce(ctx, volume.ID, in.GetNonce()); err != nil {
 		slog.Warn("nonce validation failed", "volume_uuid", volumeUUID, "error", err)
 		return nil, status.Errorf(codes.Unauthenticated, "nonce validation failed: %v", err)
 	}
 
-	// Verify the TPM quote
+	// Verify the TPM quote using the ENROLLED AK (not the one from the request)
 	if err := s.quoteVerifier.VerifyQuote(enrollment.AKPublic, in.GetNonce(), in.GetQuote()); err != nil {
 		slog.Warn("TPM quote verification failed", "volume_uuid", volumeUUID, "error", err)
 		return nil, status.Errorf(codes.Unauthenticated, "TPM attestation failed: %v", err)
@@ -248,6 +260,10 @@ type ServerConfig struct {
 
 	// Debug mode (enables gRPC reflection)
 	Debug bool
+
+	// TPM EK verification
+	EKCertCAFile   string // Path to PEM file with trusted TPM manufacturer CAs
+	EKVerifyStrict bool   // If true, reject enrollments without a valid EK certificate
 
 	// KMS configuration
 	KMSProvider string // "vault", "aws-kms", "azure-keyvault", "fortanix-sdkms"
@@ -329,6 +345,22 @@ func NewServerWithConfig(cfg ServerConfig) error {
 	pcrPolicy := tpm2.NewPCRPolicy(requiredPCRs, !cfg.EnforcePCRValues)
 	slog.Info("TPM PCR policy configured", "required_pcrs", requiredPCRs, "enforce_values", cfg.EnforcePCRValues)
 
+	// Load EK certificate trust store if configured
+	var ekTrustStore *x509.CertPool
+	if cfg.EKCertCAFile != "" {
+		caPEM, err := os.ReadFile(cfg.EKCertCAFile) // #nosec G304 -- path from operator-controlled config
+		if err != nil {
+			return fmt.Errorf("failed to read EK CA file: %w", err)
+		}
+		ekTrustStore = x509.NewCertPool()
+		if !ekTrustStore.AppendCertsFromPEM(caPEM) {
+			return fmt.Errorf("failed to parse any certificates from EK CA file")
+		}
+		slog.Info("EK certificate trust store loaded", "file", cfg.EKCertCAFile, "strict", cfg.EKVerifyStrict)
+	} else if cfg.EKVerifyStrict {
+		return fmt.Errorf("EK_VERIFY_STRICT is set but EK_CERT_CA_FILE is not configured")
+	}
+
 	lis, err := net.Listen("tcp", ":50051") // #nosec G102 -- server intentionally binds to all interfaces
 	if err != nil {
 		return fmt.Errorf("failed to listen: %w", err)
@@ -357,12 +389,14 @@ func NewServerWithConfig(cfg ServerConfig) error {
 	s := grpc.NewServer(grpcOpts...)
 
 	srv := &server{
-		vaultClient:   vaultClient,
-		vaultService:  vaultService,
-		kmsProvider:   kmsProvider,
-		db:            db,
-		pcrPolicy:     pcrPolicy,
-		quoteVerifier: tpm2.NewVerifier(),
+		vaultClient:    vaultClient,
+		vaultService:   vaultService,
+		kmsProvider:    kmsProvider,
+		db:             db,
+		pcrPolicy:      pcrPolicy,
+		quoteVerifier:  tpm2.NewVerifier(),
+		ekTrustStore:   ekTrustStore,
+		ekVerifyStrict: cfg.EKVerifyStrict,
 	}
 	api.RegisterLuksManagerServer(s, srv)
 	api.RegisterAgentServiceServer(s, srv)
@@ -500,6 +534,22 @@ func (s *server) PostImaging(ctx context.Context, in *api.PostImagingRequest) (*
 
 	// Store TPM enrollment if provided
 	if tpmEnroll := in.GetTpmEnrollment(); tpmEnroll != nil {
+		// Verify EK certificate if a trust store is configured
+		verifier := tpm2.NewVerifier()
+		if ekCert := tpmEnroll.GetEkCert(); len(ekCert) > 0 {
+			if err := verifier.VerifyEKCertificate(ekCert, s.ekTrustStore); err != nil {
+				slog.Warn("EK certificate verification failed", "volume_uuid", volume.UUID, "error", err)
+				if s.ekVerifyStrict {
+					return nil, status.Errorf(codes.Unauthenticated, "EK certificate verification failed: %v", err)
+				}
+				slog.Warn("EK verification non-strict: accepting enrollment despite invalid EK cert")
+			} else {
+				slog.Info("EK certificate verified", "volume_uuid", volume.UUID)
+			}
+		} else if s.ekVerifyStrict {
+			return nil, status.Errorf(codes.InvalidArgument, "EK certificate required but not provided")
+		}
+
 		_, err := s.db.CreateTPMEnrollment(ctx, volume.ID,
 			tpmEnroll.GetEkPublic(),
 			tpmEnroll.GetEkCert(),
