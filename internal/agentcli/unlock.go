@@ -16,6 +16,7 @@ import (
 	"github.com/siderolabs/go-blockdevice/v2/encryption"
 	"github.com/siderolabs/go-blockdevice/v2/encryption/luks"
 
+	"rootseal/internal/controlplane"
 	"rootseal/internal/tpm2"
 	"rootseal/pkg/api"
 )
@@ -31,6 +32,10 @@ func HandleUnlock(args []string) error {
 	keyOnly := fs.Bool("key-only", false, "Only output the key to stdout (for use with rootseal --key-file=-)")
 	useTPM := fs.Bool("tpm", false, "Use TPM attestation for authentication")
 	akBlobPath := fs.String("ak-blob", "/etc/rootseal/ak.blob", "Path to stored AK blob for TPM attestation")
+	certFile := fs.String("cert", "/etc/rootseal/certs/agent.crt", "Client TLS certificate")
+	keyFile := fs.String("key", "/etc/rootseal/certs/agent.key", "Client TLS private key")
+	caFile := fs.String("ca", "/etc/rootseal/certs/ca.crt", "CA certificate for server verification")
+	insecureMode := fs.Bool("insecure", false, "Disable TLS (dev only)")
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("failed parsing flags: %w", err)
@@ -67,7 +72,19 @@ func HandleUnlock(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeout)*time.Second)
 	defer cancel()
 
-	conn, err := grpc.NewClient(*serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	var dialOpt grpc.DialOption
+	if *insecureMode {
+		log.Println("WARNING: TLS disabled — running in insecure mode")
+		dialOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
+	} else {
+		creds, err := controlplane.NewClientTransportCredentials(*certFile, *keyFile, *caFile)
+		if err != nil {
+			return fmt.Errorf("failed to load TLS credentials: %w", err)
+		}
+		dialOpt = grpc.WithTransportCredentials(creds)
+	}
+
+	conn, err := grpc.NewClient(*serverAddr, dialOpt)
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}

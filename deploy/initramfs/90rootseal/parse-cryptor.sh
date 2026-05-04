@@ -7,8 +7,11 @@ if getargbool 0 rd.rootseal || getarg rootseal.server >/dev/null; then
     CRYPTOR_DEVICE=$(getarg rootseal.device)
     CRYPTOR_TIMEOUT=$(getarg rootseal.timeout)
     
-    # Set defaults
-    [ -z "$CRYPTOR_SERVER" ] && CRYPTOR_SERVER="rootseal.example.com:443"
+    # Require explicit server — no default fallback
+    if [ -z "$CRYPTOR_SERVER" ]; then
+        warn "rootseal.server not set — cannot proceed with network unlock"
+        return
+    fi
     [ -z "$CRYPTOR_TIMEOUT" ] && CRYPTOR_TIMEOUT="300"
     
     # Export for use in unlock script

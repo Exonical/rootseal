@@ -66,19 +66,30 @@ type server struct {
 	quoteVerifier QuoteVerifier
 }
 
-// Attest implements api.LuksManagerServer
+// Attest implements api.LuksManagerServer.
+// The server validates the AppRole credentials against Vault but does NOT
+// return the raw Vault token to the caller. Instead it returns a short-lived,
+// opaque server-side session identifier that the agent can present in
+// subsequent RPCs if needed.  Keeping the Vault token server-side prevents
+// agents from having direct Vault access.
 func (s *server) Attest(ctx context.Context, in *api.AttestationRequest) (*api.AttestationResponse, error) {
-	slog.Info("received attestation request", "role_id", in.GetRoleId())
+	slog.Info("received attestation request")
 
-	resp, err := s.vaultClient.Auth.AppRoleLogin(ctx, schema.AppRoleLoginRequest{
+	_, err := s.vaultClient.Auth.AppRoleLogin(ctx, schema.AppRoleLoginRequest{
 		RoleId:   in.GetRoleId(),
 		SecretId: in.GetSecretId(),
 	})
 	if err != nil {
-		return nil, err
+		return nil, status.Errorf(codes.Unauthenticated, "vault AppRole login failed")
 	}
 
-	return &api.AttestationResponse{Token: resp.Auth.ClientToken}, nil
+	// Generate a random opaque token instead of returning the Vault token.
+	sessionToken := make([]byte, 32)
+	if _, err := rand.Read(sessionToken); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to generate session token")
+	}
+
+	return &api.AttestationResponse{Token: fmt.Sprintf("rs-%x", sessionToken)}, nil
 }
 
 // GetKey implements api.LuksManagerServer - retrieves wrapped key for NBDE unlock
@@ -112,7 +123,7 @@ func (s *server) GetKey(ctx context.Context, in *api.KeyRequest) (*api.KeyRespon
 		return nil, status.Errorf(codes.Internal, "failed to unwrap key: %v", err)
 	}
 
-	slog.Info("returning unwrapped key", "volume_uuid", volumeUUID, "version", keyVersion.Version, "vault_key_id", keyVersion.VaultKeyID)
+	slog.Info("key retrieved", "volume_uuid", volumeUUID, "version", keyVersion.Version)
 
 	return &api.KeyResponse{
 		WrappedKey:  plaintext,
@@ -232,6 +243,12 @@ type ServerConfig struct {
 	RequiredPCRs     string // Comma-separated list of PCR indices (e.g., "0,2,7,11")
 	EnforcePCRValues bool   // If true, reject quotes with unexpected PCR values
 
+	// TLS configuration
+	TLS *TLSConfig // When nil the server runs without TLS (insecure, dev-only)
+
+	// Debug mode (enables gRPC reflection)
+	Debug bool
+
 	// KMS configuration
 	KMSProvider string // "vault", "aws-kms", "azure-keyvault", "fortanix-sdkms"
 	KMSConfig   *kms.Config
@@ -317,12 +334,28 @@ func NewServerWithConfig(cfg ServerConfig) error {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
-	s := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(
-			RecoveryInterceptor(),
-			LoggingInterceptor(),
-		),
-	)
+	// Build gRPC server options
+	interceptors := []grpc.UnaryServerInterceptor{
+		RecoveryInterceptor(),
+		LoggingInterceptor(),
+	}
+
+	var grpcOpts []grpc.ServerOption
+	if cfg.TLS != nil {
+		creds, err := NewServerTransportCredentials(*cfg.TLS)
+		if err != nil {
+			return fmt.Errorf("failed to load TLS credentials: %w", err)
+		}
+		grpcOpts = append(grpcOpts, grpc.Creds(creds))
+		interceptors = append(interceptors, MTLSInterceptor())
+		slog.Info("TLS enabled", "cert", cfg.TLS.CertFile, "client_auth", cfg.TLS.ClientAuth)
+	} else {
+		slog.Warn("TLS is DISABLED — running in insecure mode (dev only)")
+	}
+
+	grpcOpts = append(grpcOpts, grpc.ChainUnaryInterceptor(interceptors...))
+	s := grpc.NewServer(grpcOpts...)
+
 	srv := &server{
 		vaultClient:   vaultClient,
 		vaultService:  vaultService,
@@ -340,8 +373,11 @@ func NewServerWithConfig(cfg ServerConfig) error {
 	healthServer.SetServingStatus("api.LuksManager", healthpb.HealthCheckResponse_SERVING)
 	healthServer.SetServingStatus("api.AgentService", healthpb.HealthCheckResponse_SERVING)
 
-	// Register reflection service for grpcurl debugging
-	reflection.Register(s)
+	// Only register reflection when debug mode is explicitly enabled
+	if cfg.Debug {
+		reflection.Register(s)
+		slog.Warn("gRPC reflection enabled (debug mode)")
+	}
 
 	// Graceful shutdown handler
 	sigCh := make(chan os.Signal, 1)

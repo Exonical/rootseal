@@ -18,12 +18,12 @@ func main() {
 	// Get configuration from environment variables
 	dbConnStr := os.Getenv("DATABASE_URL")
 	if dbConnStr == "" {
-		dbConnStr = "postgres://rootseal:rootseal@localhost:5432/rootseal?sslmode=disable" // #nosec G101 -- dev default, not a production credential
+		dbConnStr = "postgres://rootseal:rootseal@localhost:5432/rootseal?sslmode=verify-full" // #nosec G101 -- dev default, not a production credential
 	}
 
 	vaultAddr := os.Getenv("VAULT_ADDR")
 	if vaultAddr == "" {
-		vaultAddr = "http://127.0.0.1:8200"
+		vaultAddr = "https://127.0.0.1:8200"
 	}
 
 	vaultToken := os.Getenv("VAULT_TOKEN")
@@ -92,6 +92,22 @@ func main() {
 		log.Fatalf("unknown KMS provider: %q", kmsProvider) // #nosec G706 -- %q escapes control characters
 	}
 
+	// TLS configuration
+	var tlsCfg *controlplane.TLSConfig
+	tlsCert := os.Getenv("TLS_CERT_FILE")
+	tlsKey := os.Getenv("TLS_KEY_FILE")
+	tlsCA := os.Getenv("TLS_CA_FILE")
+	if tlsCert != "" && tlsKey != "" {
+		tlsCfg = &controlplane.TLSConfig{
+			CertFile:   tlsCert,
+			KeyFile:    tlsKey,
+			CAFile:     tlsCA,
+			ClientAuth: os.Getenv("TLS_CLIENT_AUTH") != "false", // default: require mTLS
+		}
+	} else {
+		log.Println("WARNING: TLS_CERT_FILE / TLS_KEY_FILE not set — running WITHOUT TLS (insecure)")
+	}
+
 	cfg := controlplane.ServerConfig{
 		DatabaseURL:      dbConnStr,
 		VaultAddr:        vaultAddr,
@@ -100,6 +116,8 @@ func main() {
 		EnforcePCRValues: enforcePCRValues,
 		KMSProvider:      kmsProvider,
 		KMSConfig:        kmsCfg,
+		TLS:              tlsCfg,
+		Debug:            os.Getenv("ROOTSEAL_DEBUG") == "true",
 	}
 
 	if err := controlplane.NewServerWithConfig(cfg); err != nil {
