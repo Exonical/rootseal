@@ -16,6 +16,7 @@ import (
 	"golang.org/x/term"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/siderolabs/go-blockdevice/v2/encryption"
 	"github.com/siderolabs/go-blockdevice/v2/encryption/luks"
@@ -41,7 +42,8 @@ func HandlePostImaging(args []string) error {
 	keyFile := fs.String("key", "/etc/rootseal/certs/agent.key", "Client TLS private key")
 	caFile := fs.String("ca", "/etc/rootseal/certs/ca.crt", "CA certificate for server verification")
 	insecureMode := fs.Bool("insecure", false, "Disable TLS (dev only)")
-	sealPCRs := fs.String("seal-pcrs", "7", "Comma-separated PCR indices to bind sealed key to (default: 7 = Secure Boot state)")
+	sealPCRs := fs.String("seal-pcrs", "0,2,4,7", "Comma-separated PCR indices to bind sealed key to (default: 0,2,4,7 = firmware, option ROMs, bootloader, Secure Boot state)")
+	enrollmentToken := fs.String("enrollment-token", "", "Single-use enrollment token (required by the server in production; set via ROOTSEAL_ENROLLMENT_TOKEN to avoid argv exposure)")
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("failed parsing flags: %w", err)
@@ -165,9 +167,18 @@ func HandlePostImaging(args []string) error {
 		log.Printf("  - TPM AK saved to %s", *akBlobPath)
 	}
 
-	// Call PostImaging RPC
+	// Call PostImaging RPC. The single-use enrollment token is sent out-of-band
+	// via gRPC metadata (not in the request body). Prefer the env var so the
+	// token never appears in argv/process listings.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	tokenVal := os.Getenv("ROOTSEAL_ENROLLMENT_TOKEN")
+	if tokenVal == "" {
+		tokenVal = *enrollmentToken
+	}
+	if tokenVal != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-rootseal-enrollment-token", tokenVal)
+	}
 	postImagingRes, err := c.PostImaging(ctx, &api.PostImagingRequest{
 		DevicePath:      *device,
 		Hostname:        sysInfo.Hostname,

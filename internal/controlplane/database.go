@@ -1,7 +1,9 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,19 +15,35 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+// HashEnrollmentToken returns the SHA-256 hash of an enrollment token. Only the
+// hash is ever persisted or compared, so the plaintext token never touches the
+// database or logs.
+func HashEnrollmentToken(token string) []byte {
+	sum := sha256.Sum256([]byte(token))
+	return sum[:]
+}
+
 // DB represents database operations
 type DB struct {
 	conn *gorm.DB
 }
 
-// Agent represents an agent record
+// Agent represents an agent record.
+//
+// AuthorizedCN binds the agent (and therefore its volumes) to a single mTLS
+// client identity (certificate Common Name) established at enrollment time.
+// Key release is authorized against this value, so one host cannot request
+// another host's key even with a valid certificate. Revoked marks a host as
+// decommissioned; revoked hosts are refused all key access.
 type Agent struct {
-	ID        uuid.UUID       `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	Hostname  string          `gorm:"uniqueIndex:idx_agent_hostname_serial;not null" json:"hostname"`
-	Serial    string          `gorm:"uniqueIndex:idx_agent_hostname_serial" json:"serial"`
-	Labels    json.RawMessage `gorm:"type:jsonb;default:'{}'" json:"labels"`
-	LastSeen  time.Time       `gorm:"not null;default:now()" json:"last_seen"`
-	CreatedAt time.Time       `gorm:"autoCreateTime" json:"created_at"`
+	ID           uuid.UUID       `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	Hostname     string          `gorm:"uniqueIndex:idx_agent_hostname_serial;not null" json:"hostname"`
+	Serial       string          `gorm:"uniqueIndex:idx_agent_hostname_serial" json:"serial"`
+	AuthorizedCN string          `gorm:"index" json:"authorized_cn"`
+	Revoked      bool            `gorm:"not null;default:false" json:"revoked"`
+	Labels       json.RawMessage `gorm:"type:jsonb;default:'{}'" json:"labels"`
+	LastSeen     time.Time       `gorm:"not null;default:now()" json:"last_seen"`
+	CreatedAt    time.Time       `gorm:"autoCreateTime" json:"created_at"`
 }
 
 // Volume represents a volume record
@@ -49,16 +67,34 @@ type KeyVersion struct {
 	Volume     *Volume   `gorm:"foreignKey:VolumeID" json:"-"`
 }
 
-// TPMEnrollment represents a TPM enrollment record
+// TPMEnrollment represents a TPM enrollment record.
+//
+// PinnedPCRs holds the expected PCR digests for this volume (JSON map of PCR
+// index -> hex digest). It is populated on first successful attestation when
+// PCR value enforcement is enabled, and subsequent unlocks must match it.
 type TPMEnrollment struct {
-	ID        uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	VolumeID  uuid.UUID `gorm:"type:uuid;uniqueIndex;not null" json:"volume_id"`
-	EKPublic  []byte    `json:"ek_public"`
-	EKCert    []byte    `json:"ek_cert"`
-	AKPublic  []byte    `gorm:"not null" json:"ak_public"`
-	AKName    []byte    `gorm:"not null" json:"ak_name"`
-	CreatedAt time.Time `gorm:"autoCreateTime" json:"created_at"`
-	Volume    *Volume   `gorm:"foreignKey:VolumeID" json:"-"`
+	ID         uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	VolumeID   uuid.UUID `gorm:"type:uuid;uniqueIndex;not null" json:"volume_id"`
+	EKPublic   []byte    `json:"ek_public"`
+	EKCert     []byte    `json:"ek_cert"`
+	AKPublic   []byte    `gorm:"not null" json:"ak_public"`
+	AKName     []byte    `gorm:"not null" json:"ak_name"`
+	PinnedPCRs []byte    `json:"pinned_pcrs"`
+	CreatedAt  time.Time `gorm:"autoCreateTime" json:"created_at"`
+	Volume     *Volume   `gorm:"foreignKey:VolumeID" json:"-"`
+}
+
+// EnrollmentToken is a single-use, high-entropy credential required to enroll
+// a host via PostImaging. Only the SHA-256 hash of the token is stored; the
+// plaintext is shown once at creation time and never logged. BoundCN, when
+// set, restricts the token to a specific mTLS client identity.
+type EnrollmentToken struct {
+	ID        uuid.UUID  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	TokenHash []byte     `gorm:"uniqueIndex;not null" json:"-"`
+	BoundCN   string     `json:"bound_cn"`
+	ExpiresAt time.Time  `gorm:"not null" json:"expires_at"`
+	UsedAt    *time.Time `json:"used_at"`
+	CreatedAt time.Time  `gorm:"autoCreateTime" json:"created_at"`
 }
 
 // AttestationNonce represents a nonce for replay protection
@@ -91,7 +127,7 @@ func NewDB(dsn string) (*DB, error) {
 	sqlDB.SetConnMaxIdleTime(1 * time.Minute)
 
 	// Auto-migrate schema
-	if err := db.AutoMigrate(&Agent{}, &Volume{}, &KeyVersion{}, &TPMEnrollment{}, &AttestationNonce{}); err != nil {
+	if err := db.AutoMigrate(&Agent{}, &Volume{}, &KeyVersion{}, &TPMEnrollment{}, &AttestationNonce{}, &EnrollmentToken{}); err != nil {
 		return nil, fmt.Errorf("failed to auto-migrate: %w", err)
 	}
 
@@ -107,13 +143,17 @@ func (db *DB) Close() error {
 	return sqlDB.Close()
 }
 
-// UpsertAgent creates or updates an agent record
-func (db *DB) UpsertAgent(ctx context.Context, hostname, serial string, labels json.RawMessage) (*Agent, error) {
+// UpsertAgent creates or updates an agent record. authorizedCN is the mTLS
+// client identity that is permitted to retrieve this agent's keys. On update
+// the binding is only (re)set when authorizedCN is non-empty so that an
+// unauthenticated/dev caller cannot clear an existing binding.
+func (db *DB) UpsertAgent(ctx context.Context, hostname, serial, authorizedCN string, labels json.RawMessage) (*Agent, error) {
 	agent := Agent{
-		Hostname: hostname,
-		Serial:   serial,
-		Labels:   labels,
-		LastSeen: time.Now(),
+		Hostname:     hostname,
+		Serial:       serial,
+		AuthorizedCN: authorizedCN,
+		Labels:       labels,
+		LastSeen:     time.Now(),
 	}
 
 	// Try to find existing agent
@@ -123,6 +163,9 @@ func (db *DB) UpsertAgent(ctx context.Context, hostname, serial string, labels j
 		// Update existing
 		existing.Labels = labels
 		existing.LastSeen = time.Now()
+		if authorizedCN != "" {
+			existing.AuthorizedCN = authorizedCN
+		}
 		if err := db.conn.WithContext(ctx).Save(&existing).Error; err != nil {
 			return nil, fmt.Errorf("failed to update agent: %w", err)
 		}
@@ -135,6 +178,35 @@ func (db *DB) UpsertAgent(ctx context.Context, hostname, serial string, labels j
 		return &agent, nil
 	}
 	return nil, fmt.Errorf("failed to upsert agent: %w", err)
+}
+
+// GetAgent retrieves an agent by ID.
+func (db *DB) GetAgent(ctx context.Context, agentID uuid.UUID) (*Agent, error) {
+	var agent Agent
+	err := db.conn.WithContext(ctx).Where("id = ?", agentID).First(&agent).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("agent not found")
+		}
+		return nil, fmt.Errorf("failed to get agent: %w", err)
+	}
+	return &agent, nil
+}
+
+// SetAgentRevoked marks an agent (by hostname+serial) as revoked or active.
+// Revoked agents are refused all key access. Used for host decommissioning.
+func (db *DB) SetAgentRevoked(ctx context.Context, hostname, serial string, revoked bool) error {
+	result := db.conn.WithContext(ctx).
+		Model(&Agent{}).
+		Where("hostname = ? AND serial = ?", hostname, serial).
+		Update("revoked", revoked)
+	if result.Error != nil {
+		return fmt.Errorf("failed to update agent revocation: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("agent not found")
+	}
+	return nil
 }
 
 // UpsertVolume creates or updates a volume record
@@ -248,7 +320,16 @@ func (db *DB) GetKeyVersion(ctx context.Context, volumeID uuid.UUID, version int
 	return &keyVersion, nil
 }
 
-// CreateTPMEnrollment stores TPM enrollment data for a volume
+// ErrAKRebind is returned when an enrollment attempts to replace an existing
+// Attestation Key with a different one. Rebinding the AK would let an attacker
+// re-root the volume's trust, so it is refused.
+var ErrAKRebind = errors.New("TPM AK rebind not allowed: volume already enrolled with a different AK")
+
+// CreateTPMEnrollment stores TPM enrollment data for a volume.
+//
+// The Attestation Key is immutable once set: if an enrollment already exists
+// with a different AKPublic, the call fails with ErrAKRebind. Re-enrolling with
+// the identical AK is permitted (idempotent) and refreshes the EK material.
 func (db *DB) CreateTPMEnrollment(ctx context.Context, volumeID uuid.UUID, ekPublic, ekCert, akPublic, akName []byte) (*TPMEnrollment, error) {
 	enrollment := TPMEnrollment{
 		VolumeID: volumeID,
@@ -258,14 +339,15 @@ func (db *DB) CreateTPMEnrollment(ctx context.Context, volumeID uuid.UUID, ekPub
 		AKName:   akName,
 	}
 
-	// Upsert: update if exists, create if not
 	var existing TPMEnrollment
 	err := db.conn.WithContext(ctx).Where("volume_id = ?", volumeID).First(&existing).Error
 	if err == nil {
-		// Update existing
+		// An enrollment already exists. Refuse to rebind to a different AK.
+		if !bytes.Equal(existing.AKPublic, akPublic) {
+			return nil, ErrAKRebind
+		}
 		existing.EKPublic = ekPublic
 		existing.EKCert = ekCert
-		existing.AKPublic = akPublic
 		existing.AKName = akName
 		if err := db.conn.WithContext(ctx).Save(&existing).Error; err != nil {
 			return nil, fmt.Errorf("failed to update TPM enrollment: %w", err)
@@ -278,6 +360,22 @@ func (db *DB) CreateTPMEnrollment(ctx context.Context, volumeID uuid.UUID, ekPub
 		return &enrollment, nil
 	}
 	return nil, fmt.Errorf("failed to create TPM enrollment: %w", err)
+}
+
+// PinTPMEnrollmentPCRs stores the expected PCR digests for a volume (used for
+// trust-on-first-use PCR value enforcement).
+func (db *DB) PinTPMEnrollmentPCRs(ctx context.Context, volumeID uuid.UUID, pinnedPCRs []byte) error {
+	result := db.conn.WithContext(ctx).
+		Model(&TPMEnrollment{}).
+		Where("volume_id = ?", volumeID).
+		Update("pinned_pcrs", pinnedPCRs)
+	if result.Error != nil {
+		return fmt.Errorf("failed to pin PCRs: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("no TPM enrollment found for volume")
+	}
+	return nil
 }
 
 // GetTPMEnrollment retrieves TPM enrollment for a volume
@@ -322,6 +420,40 @@ func (db *DB) ValidateAndConsumeNonce(ctx context.Context, volumeID uuid.UUID, n
 	}
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("nonce invalid, expired, or already used")
+	}
+	return nil
+}
+
+// CreateEnrollmentToken stores the hash of a new single-use enrollment token.
+// boundCN may be empty to allow any client identity. ttl sets the validity
+// window.
+func (db *DB) CreateEnrollmentToken(ctx context.Context, tokenHash []byte, boundCN string, ttl time.Duration) error {
+	tok := EnrollmentToken{
+		TokenHash: tokenHash,
+		BoundCN:   boundCN,
+		ExpiresAt: time.Now().Add(ttl),
+	}
+	if err := db.conn.WithContext(ctx).Create(&tok).Error; err != nil {
+		return fmt.Errorf("failed to create enrollment token: %w", err)
+	}
+	return nil
+}
+
+// ConsumeEnrollmentToken atomically validates and marks an enrollment token as
+// used. It fails closed if the token is unknown, expired, already used, or
+// bound to a different client identity. The single UPDATE guarantees a token
+// can be consumed at most once even under concurrent requests.
+func (db *DB) ConsumeEnrollmentToken(ctx context.Context, tokenHash []byte, cn string) error {
+	now := time.Now()
+	result := db.conn.WithContext(ctx).
+		Model(&EnrollmentToken{}).
+		Where("token_hash = ? AND used_at IS NULL AND expires_at > ? AND (bound_cn = '' OR bound_cn = ?)", tokenHash, now, cn).
+		Update("used_at", now)
+	if result.Error != nil {
+		return fmt.Errorf("failed to consume enrollment token: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("enrollment token invalid, expired, already used, or not authorized")
 	}
 	return nil
 }

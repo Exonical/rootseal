@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -89,6 +90,34 @@ func LoggingInterceptor() grpc.UnaryServerInterceptor {
 		)
 
 		return resp, err
+	}
+}
+
+// TimeoutInterceptor enforces a maximum handler deadline on every RPC, bounding
+// resource use and preventing slow requests from pinning the server. A caller's
+// shorter deadline is preserved.
+func TimeoutInterceptor(d time.Duration) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		ctx, cancel := context.WithTimeout(ctx, d)
+		defer cancel()
+		return handler(ctx, req)
+	}
+}
+
+// RateLimitInterceptor applies a global token-bucket rate limit across all RPCs
+// to blunt brute-force and denial-of-service attempts against the unlock and
+// enrollment surfaces. Health checks are exempt so liveness probes are not
+// throttled.
+func RateLimitInterceptor(rps float64, burst int) grpc.UnaryServerInterceptor {
+	limiter := rate.NewLimiter(rate.Limit(rps), burst)
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		if unauthenticatedMethods[info.FullMethod] {
+			return handler(ctx, req)
+		}
+		if !limiter.Allow() {
+			return nil, status.Error(codes.ResourceExhausted, "rate limit exceeded")
+		}
+		return handler(ctx, req)
 	}
 }
 

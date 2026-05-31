@@ -52,13 +52,23 @@ func HandleUnseal(args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to unseal key: %w", err)
 	}
+	// Minimize the key's lifetime in memory: wipe it as soon as we are done.
+	defer func() {
+		for i := range key {
+			key[i] = 0
+		}
+	}()
 
 	if *keyOnly {
-		// Output raw key for piping
+		// Output the raw key bytes only, for piping directly into cryptsetup's
+		// stdin. The key is never rendered to a terminal or formatted into a
+		// log line.
 		_, _ = os.Stdout.Write(key)
 	} else {
+		// Never print the unsealed key. Report success only; use --key-only to
+		// pipe the raw key to cryptsetup.
 		fmt.Printf("Successfully unsealed key for volume %s\n", token.VolumeUUID)
-		fmt.Printf("Key (hex): %x\n", key)
+		fmt.Fprintln(os.Stderr, "key not printed; re-run with --key-only to pipe the raw key to cryptsetup")
 	}
 
 	return nil
