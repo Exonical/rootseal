@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -36,12 +37,15 @@ type DBStore interface {
 	CreateNonce(ctx context.Context, volumeID uuid.UUID, nonce []byte) error
 	ValidateAndConsumeNonce(ctx context.Context, volumeID uuid.UUID, nonce []byte) error
 	GetTPMEnrollment(ctx context.Context, volumeID uuid.UUID) (*TPMEnrollment, error)
-	UpsertAgent(ctx context.Context, hostname, serial string, labels json.RawMessage) (*Agent, error)
+	UpsertAgent(ctx context.Context, hostname, serial, authorizedCN string, labels json.RawMessage) (*Agent, error)
+	GetAgent(ctx context.Context, agentID uuid.UUID) (*Agent, error)
 	GetVolumeByDevicePath(ctx context.Context, agentID uuid.UUID, devicePath string) (*Volume, error)
 	GetLatestKeyVersion(ctx context.Context, volumeID uuid.UUID) (*KeyVersion, error)
 	UpsertVolume(ctx context.Context, agentID uuid.UUID, devicePath, volumeUUID string) (*Volume, error)
 	CreateKeyVersion(ctx context.Context, volumeID uuid.UUID, version int, vaultKeyID, wrappedKey string) (*KeyVersion, error)
 	CreateTPMEnrollment(ctx context.Context, volumeID uuid.UUID, ekPublic, ekCert, akPublic, akName []byte) (*TPMEnrollment, error)
+	PinTPMEnrollmentPCRs(ctx context.Context, volumeID uuid.UUID, pinnedPCRs []byte) error
+	ConsumeEnrollmentToken(ctx context.Context, tokenHash []byte, cn string) error
 }
 
 // KeyStore wraps key encryption/decryption operations.
@@ -68,6 +72,12 @@ type server struct {
 	quoteVerifier  QuoteVerifier
 	ekTrustStore   *x509.CertPool // Trusted TPM manufacturer CA certs for EK verification
 	ekVerifyStrict bool           // If true, reject enrollments without a valid EK cert
+
+	// Security policy (set from ServerConfig; secure-by-default).
+	requireAuth            bool // Enforce per-volume mTLS-identity authorization on key access
+	allowUnattestedGetKey  bool // Allow the legacy GetKey path that returns a key without TPM attestation
+	requireEnrollmentToken bool // Require a valid single-use enrollment token for PostImaging
+	enforcePCRValues       bool // Pin and enforce per-volume PCR digests on attestation
 }
 
 // Attest implements api.LuksManagerServer.
@@ -105,11 +115,24 @@ func (s *server) GetKey(ctx context.Context, in *api.KeyRequest) (*api.KeyRespon
 		return nil, status.Errorf(codes.InvalidArgument, "volume_uuid is required")
 	}
 
+	// The unattested key path returns a disk key with no proof the requester is
+	// running on the enrolled, measured host. It is disabled by default and may
+	// only be enabled in an explicit, non-production dev mode.
+	if !s.allowUnattestedGetKey {
+		auditDeny("unlock", volumeUUID, "", "unattested GetKey disabled; use GetKeyWithAttestation")
+		return nil, status.Errorf(codes.FailedPrecondition, "TPM attestation required: use GetKeyWithAttestation")
+	}
+
 	// Look up the volume in the database
 	volume, err := s.db.GetVolumeByUUID(ctx, volumeUUID)
 	if err != nil {
 		slog.Error("failed to find volume", "volume_uuid", volumeUUID, "error", err)
 		return nil, status.Errorf(codes.NotFound, "volume not found: %v", err)
+	}
+
+	// Enforce per-host authorization bound to the enrolled mTLS identity.
+	if err := s.authorizeVolume(ctx, "unlock", volume); err != nil {
+		return nil, err
 	}
 
 	// Get the requested key version (0 = latest)
@@ -127,6 +150,8 @@ func (s *server) GetKey(ctx context.Context, in *api.KeyRequest) (*api.KeyRespon
 		return nil, status.Errorf(codes.Internal, "failed to unwrap key: %v", err)
 	}
 
+	cn, _ := PeerCNFromContext(ctx)
+	auditAllow("unlock", volumeUUID, cn)
 	slog.Info("key retrieved", "volume_uuid", volumeUUID, "version", keyVersion.Version)
 
 	return &api.KeyResponse{
@@ -147,6 +172,11 @@ func (s *server) GetNonce(ctx context.Context, in *api.NonceRequest) (*api.Nonce
 	volume, err := s.db.GetVolumeByUUID(ctx, volumeUUID)
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "volume not found: %v", err)
+	}
+
+	// A host may only obtain a challenge nonce for a volume it is authorized for.
+	if err := s.authorizeVolume(ctx, "nonce", volume); err != nil {
+		return nil, err
 	}
 
 	// Generate 32-byte random nonce
@@ -186,6 +216,11 @@ func (s *server) GetKeyWithAttestation(ctx context.Context, in *api.AttestationK
 		return nil, status.Errorf(codes.NotFound, "volume not found: %v", err)
 	}
 
+	// Enforce per-host authorization bound to the enrolled mTLS identity.
+	if err := s.authorizeVolume(ctx, "unlock", volume); err != nil {
+		return nil, err
+	}
+
 	// Get TPM enrollment for this volume
 	enrollment, err := s.db.GetTPMEnrollment(ctx, volume.ID)
 	if err != nil {
@@ -206,24 +241,57 @@ func (s *server) GetKeyWithAttestation(ctx context.Context, in *api.AttestationK
 	// Validate and consume the nonce (prevents replay attacks)
 	if err := s.db.ValidateAndConsumeNonce(ctx, volume.ID, in.GetNonce()); err != nil {
 		slog.Warn("nonce validation failed", "volume_uuid", volumeUUID, "error", err)
-		return nil, status.Errorf(codes.Unauthenticated, "nonce validation failed: %v", err)
+		auditDeny("unlock", volumeUUID, "", "nonce invalid, expired, or replayed")
+		return nil, status.Error(codes.Unauthenticated, "nonce validation failed")
 	}
 
 	// Verify the TPM quote using the ENROLLED AK (not the one from the request)
 	if err := s.quoteVerifier.VerifyQuote(enrollment.AKPublic, in.GetNonce(), in.GetQuote()); err != nil {
 		slog.Warn("TPM quote verification failed", "volume_uuid", volumeUUID, "error", err)
-		return nil, status.Errorf(codes.Unauthenticated, "TPM attestation failed: %v", err)
+		auditDeny("unlock", volumeUUID, "", "quote verification failed")
+		return nil, status.Error(codes.Unauthenticated, "TPM attestation failed")
 	}
 
-	// Verify PCR policy if configured
+	// Verify PCR policy if configured (required-PCR presence + selection).
 	if s.pcrPolicy != nil {
 		if err := s.pcrPolicy.Verify(in.GetQuote().GetPcrs()); err != nil {
 			slog.Warn("PCR policy verification failed", "volume_uuid", volumeUUID, "error", err)
-			return nil, status.Errorf(codes.Unauthenticated, "PCR policy check failed: %v", err)
+			auditDeny("unlock", volumeUUID, "", "PCR policy mismatch")
+			return nil, status.Error(codes.Unauthenticated, "PCR policy check failed")
 		}
 		slog.Info("PCR policy verified", "volume_uuid", volumeUUID)
 	}
 
+	// Enforce per-volume PCR values (trust-on-first-use). On the first
+	// successful attestation the observed PCR digests are pinned; every
+	// subsequent unlock must reproduce exactly those digests. This binds the
+	// authorization decision to the measured boot state, not merely to PCR
+	// presence.
+	if s.enforcePCRValues {
+		if len(enrollment.PinnedPCRs) == 0 {
+			pinned, err := pcrsToPinned(in.GetQuote().GetPcrs())
+			if err != nil {
+				return nil, status.Error(codes.Internal, "failed to pin PCR values")
+			}
+			if err := s.db.PinTPMEnrollmentPCRs(ctx, volume.ID, pinned); err != nil {
+				return nil, status.Error(codes.Internal, "failed to persist PCR pin")
+			}
+			slog.Info("PCR values pinned on first attestation", "volume_uuid", volumeUUID)
+		} else {
+			match, err := pcrsMatchPinned(enrollment.PinnedPCRs, in.GetQuote().GetPcrs())
+			if err != nil {
+				return nil, status.Error(codes.Internal, "failed to compare PCR values")
+			}
+			if !match {
+				slog.Warn("pinned PCR value mismatch", "volume_uuid", volumeUUID)
+				auditDeny("unlock", volumeUUID, "", "pinned PCR value mismatch")
+				return nil, status.Error(codes.Unauthenticated, "PCR value check failed")
+			}
+		}
+	}
+
+	cn, _ := PeerCNFromContext(ctx)
+	auditAllow("unlock", volumeUUID, cn)
 	slog.Info("TPM attestation verified", "volume_uuid", volumeUUID)
 
 	// Get the key version
@@ -260,6 +328,26 @@ type ServerConfig struct {
 	// TLS configuration
 	TLS *TLSConfig // When nil the server runs without TLS (insecure, dev-only)
 
+	// Production requires the full set of secure controls (mTLS with client
+	// auth, TPM attestation, a non-empty PCR policy, Vault auth, enrollment
+	// tokens) and refuses to start otherwise. This is the default operating
+	// mode; insecure dev behavior must be explicitly opted into.
+	Production bool
+
+	// AllowInsecure must be explicitly set to run without TLS. It is only
+	// honored when Production is false and exists so that insecure mode cannot
+	// be enabled by accident (e.g. by merely omitting TLS config).
+	AllowInsecure bool
+
+	// AllowUnattestedGetKey enables the legacy GetKey path that returns a disk
+	// key without TPM attestation. It is refused in production and disabled by
+	// default everywhere.
+	AllowUnattestedGetKey bool
+
+	// RequireEnrollmentToken requires a valid single-use enrollment token for
+	// PostImaging. Always enforced in production.
+	RequireEnrollmentToken bool
+
 	// Debug mode (enables gRPC reflection)
 	Debug bool
 
@@ -270,6 +358,44 @@ type ServerConfig struct {
 	// KMS configuration
 	KMSProvider string // "vault", "aws-kms", "azure-keyvault", "fortanix-sdkms"
 	KMSConfig   *kms.Config
+}
+
+// Validate enforces secure-by-default invariants. In production mode it
+// requires mTLS with client-certificate verification, a non-empty PCR policy,
+// PCR value enforcement, and refuses insecure conveniences (no-TLS, debug
+// reflection, the unattested GetKey path). Outside production it still refuses
+// to run without TLS unless AllowInsecure is explicitly set, so insecure mode
+// can never be enabled merely by omitting configuration.
+func (cfg ServerConfig) Validate() error {
+	if cfg.Production {
+		if cfg.TLS == nil || !cfg.TLS.ClientAuth {
+			return fmt.Errorf("production mode requires mTLS with client certificate verification (TLS.ClientAuth)")
+		}
+		if cfg.TLS.CAFile == "" {
+			return fmt.Errorf("production mode requires a client CA (TLS.CAFile) for mTLS")
+		}
+		if cfg.RequiredPCRs == "" {
+			return fmt.Errorf("production mode requires a non-empty PCR policy (TPM_REQUIRED_PCRS)")
+		}
+		if !cfg.EnforcePCRValues {
+			return fmt.Errorf("production mode requires PCR value enforcement (TPM_ENFORCE_PCR_VALUES)")
+		}
+		if cfg.VaultRoleID == "" && cfg.VaultToken == "" {
+			return fmt.Errorf("production mode requires Vault authentication")
+		}
+		if cfg.AllowUnattestedGetKey {
+			return fmt.Errorf("production mode forbids the unattested GetKey path")
+		}
+		if cfg.Debug {
+			return fmt.Errorf("production mode forbids debug gRPC reflection")
+		}
+		return nil
+	}
+
+	if cfg.TLS == nil && !cfg.AllowInsecure {
+		return fmt.Errorf("refusing to start without TLS: set AllowInsecure for explicit dev mode or configure TLS")
+	}
+	return nil
 }
 
 // NewServer creates and starts a new gRPC server with graceful shutdown (uses defaults).
@@ -288,6 +414,19 @@ func NewServerWithConfig(cfg ServerConfig) error {
 		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
+
+	// Fail closed on insecure configuration before doing anything else.
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("insecure configuration rejected: %w", err)
+	}
+	if cfg.Production {
+		// In production all PCR values are enforced and enrollment is gated.
+		cfg.EnforcePCRValues = true
+		cfg.RequireEnrollmentToken = true
+		slog.Info("starting in PRODUCTION mode (mTLS + attestation + PCR enforcement required)")
+	} else {
+		slog.Warn("starting in NON-PRODUCTION mode — do not use for real key material")
+	}
 
 	// Initialize database
 	db, err := NewDB(cfg.DatabaseURL)
@@ -388,9 +527,12 @@ func NewServerWithConfig(cfg ServerConfig) error {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
-	// Build gRPC server options
+	// Build gRPC server options. Order matters: recover from panics first, then
+	// bound request time and rate before authentication and logging.
 	interceptors := []grpc.UnaryServerInterceptor{
 		RecoveryInterceptor(),
+		TimeoutInterceptor(30 * time.Second),
+		RateLimitInterceptor(50, 100),
 		LoggingInterceptor(),
 	}
 
@@ -411,14 +553,18 @@ func NewServerWithConfig(cfg ServerConfig) error {
 	s := grpc.NewServer(grpcOpts...)
 
 	srv := &server{
-		vaultClient:    vaultClient,
-		vaultService:   vaultService,
-		kmsProvider:    kmsProvider,
-		db:             db,
-		pcrPolicy:      pcrPolicy,
-		quoteVerifier:  tpm2.NewVerifier(),
-		ekTrustStore:   ekTrustStore,
-		ekVerifyStrict: cfg.EKVerifyStrict,
+		vaultClient:            vaultClient,
+		vaultService:           vaultService,
+		kmsProvider:            kmsProvider,
+		db:                     db,
+		pcrPolicy:              pcrPolicy,
+		quoteVerifier:          tpm2.NewVerifier(),
+		ekTrustStore:           ekTrustStore,
+		ekVerifyStrict:         cfg.EKVerifyStrict,
+		requireAuth:            cfg.TLS != nil && cfg.TLS.ClientAuth,
+		allowUnattestedGetKey:  cfg.AllowUnattestedGetKey && !cfg.Production,
+		requireEnrollmentToken: cfg.RequireEnrollmentToken,
+		enforcePCRValues:       cfg.EnforcePCRValues,
 	}
 	api.RegisterLuksManagerServer(s, srv)
 	api.RegisterAgentServiceServer(s, srv)
@@ -509,6 +655,27 @@ func (s *server) PostImaging(ctx context.Context, in *api.PostImagingRequest) (*
 		return nil, status.Errorf(codes.InvalidArgument, "new_recovery_key is required")
 	}
 
+	// The mTLS client identity (if any) is bound to the agent at enrollment and
+	// later required for key release.
+	cn, _ := PeerCNFromContext(ctx)
+
+	// Require a valid single-use enrollment token to prevent rogue
+	// self-enrollment. The token is supplied out-of-band via gRPC metadata,
+	// hashed, and atomically consumed; reuse, expiry, or binding mismatch all
+	// fail closed.
+	if s.requireEnrollmentToken {
+		token := enrollmentTokenFromContext(ctx)
+		if token == "" {
+			auditDeny("enrollment", in.GetHostname(), cn, "missing enrollment token")
+			return nil, status.Error(codes.Unauthenticated, "enrollment token required")
+		}
+		if err := s.db.ConsumeEnrollmentToken(ctx, HashEnrollmentToken(token), cn); err != nil {
+			auditDeny("enrollment", in.GetHostname(), cn, "enrollment token rejected")
+			return nil, status.Error(codes.PermissionDenied, "enrollment token invalid")
+		}
+		auditAllow("enrollment", in.GetHostname(), cn)
+	}
+
 	// Parse labels if provided
 	var labels json.RawMessage
 	if len(in.GetLabels()) > 0 {
@@ -521,8 +688,8 @@ func (s *server) PostImaging(ctx context.Context, in *api.PostImagingRequest) (*
 		labels = json.RawMessage("{}")
 	}
 
-	// Upsert agent record
-	agent, err := s.db.UpsertAgent(ctx, in.GetHostname(), in.GetSerial(), labels)
+	// Upsert agent record, binding it to the authenticated client identity.
+	agent, err := s.db.UpsertAgent(ctx, in.GetHostname(), in.GetSerial(), cn, labels)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to upsert agent: %v", err)
 	}
@@ -619,6 +786,13 @@ func (s *server) PostImaging(ctx context.Context, in *api.PostImagingRequest) (*
 			tpmEnroll.GetAkPublic(),
 			tpmEnroll.GetAkName(),
 		)
+		if errors.Is(err, ErrAKRebind) {
+			// Refuse to rebind an already-enrolled volume to a different TPM AK;
+			// this blocks rogue re-enrollment that would hijack trust.
+			slog.Warn("rejected TPM AK rebind", "volume_uuid", volume.UUID)
+			auditDeny("enrollment", in.GetHostname(), cn, "AK rebind attempt")
+			return nil, status.Error(codes.PermissionDenied, "TPM AK rebind not allowed")
+		}
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to store TPM enrollment: %v", err)
 		}

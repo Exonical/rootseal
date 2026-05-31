@@ -1,10 +1,21 @@
 #!/bin/bash
-# Generate throwaway mTLS certificates for development
+# Generate throwaway mTLS certificates for development.
+#
+# Usage: mkcerts.sh [AGENT_CN]
+#
+# Each host MUST have its own agent certificate with a UNIQUE common name (CN).
+# The control plane binds a volume to the enrolling client's CN and refuses to
+# release a key to any other identity, so a shared agent CN would let every host
+# unlock every other host's volume. AGENT_CN defaults to this machine's
+# hostname; pass an explicit value to mint a cert for a specific host.
 
 set -e
 
 CERT_DIR="certs"
 mkdir -p "$CERT_DIR"
+
+AGENT_CN="${1:-$(hostname -f 2>/dev/null || hostname)}"
+echo "Issuing agent certificate with CN=${AGENT_CN}"
 
 # Generate CA private key
 openssl genrsa -out "$CERT_DIR/ca.key" 4096
@@ -37,8 +48,8 @@ EOF
 # Generate agent private key
 openssl genrsa -out "$CERT_DIR/agent.key" 4096
 
-# Generate agent certificate signing request
-openssl req -subj "/C=US/ST=CA/O=Cryptor Dev/CN=rootseal" -new -key "$CERT_DIR/agent.key" -out "$CERT_DIR/agent.csr"
+# Generate agent certificate signing request (per-host unique CN)
+openssl req -subj "/C=US/ST=CA/O=Cryptor Dev/CN=${AGENT_CN}" -new -key "$CERT_DIR/agent.key" -out "$CERT_DIR/agent.csr"
 
 # Generate agent certificate
 openssl x509 -req -in "$CERT_DIR/agent.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" -CAcreateserial -out "$CERT_DIR/agent.crt" -days 365 -sha256
@@ -62,5 +73,8 @@ chmod 644 "$CERT_DIR"/*.crt
 echo "Generated development certificates in $CERT_DIR/"
 echo "CA: $CERT_DIR/ca.crt"
 echo "Server: $CERT_DIR/server.{crt,key}"
-echo "Agent: $CERT_DIR/agent.{crt,key}"
+echo "Agent: $CERT_DIR/agent.{crt,key} (CN=${AGENT_CN})"
 echo "Init: $CERT_DIR/init.{crt,key}"
+echo
+echo "NOTE: re-run with a per-host CN for each additional host, e.g.:"
+echo "  $0 host01.example.com"

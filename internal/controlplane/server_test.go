@@ -25,12 +25,15 @@ type mockDB struct {
 	createNonce           func(ctx context.Context, volumeID uuid.UUID, nonce []byte) error
 	validateConsumeNonce  func(ctx context.Context, volumeID uuid.UUID, nonce []byte) error
 	getTPMEnrollment      func(ctx context.Context, volumeID uuid.UUID) (*TPMEnrollment, error)
-	upsertAgent           func(ctx context.Context, hostname, serial string, labels json.RawMessage) (*Agent, error)
+	upsertAgent           func(ctx context.Context, hostname, serial, authorizedCN string, labels json.RawMessage) (*Agent, error)
+	getAgent              func(ctx context.Context, agentID uuid.UUID) (*Agent, error)
 	getVolumeByDevicePath func(ctx context.Context, agentID uuid.UUID, devicePath string) (*Volume, error)
 	getLatestKeyVersion   func(ctx context.Context, volumeID uuid.UUID) (*KeyVersion, error)
 	upsertVolume          func(ctx context.Context, agentID uuid.UUID, devicePath, volumeUUID string) (*Volume, error)
 	createKeyVersion      func(ctx context.Context, volumeID uuid.UUID, version int, vaultKeyID, wrappedKey string) (*KeyVersion, error)
 	createTPMEnrollment   func(ctx context.Context, volumeID uuid.UUID, ekPublic, ekCert, akPublic, akName []byte) (*TPMEnrollment, error)
+	pinTPMEnrollmentPCRs  func(ctx context.Context, volumeID uuid.UUID, pinnedPCRs []byte) error
+	consumeEnrollmentTok  func(ctx context.Context, tokenHash []byte, cn string) error
 }
 
 func (m *mockDB) GetVolumeByUUID(ctx context.Context, v string) (*Volume, error) {
@@ -48,8 +51,14 @@ func (m *mockDB) ValidateAndConsumeNonce(ctx context.Context, id uuid.UUID, nonc
 func (m *mockDB) GetTPMEnrollment(ctx context.Context, id uuid.UUID) (*TPMEnrollment, error) {
 	return m.getTPMEnrollment(ctx, id)
 }
-func (m *mockDB) UpsertAgent(ctx context.Context, hostname, serial string, labels json.RawMessage) (*Agent, error) {
-	return m.upsertAgent(ctx, hostname, serial, labels)
+func (m *mockDB) UpsertAgent(ctx context.Context, hostname, serial, authorizedCN string, labels json.RawMessage) (*Agent, error) {
+	return m.upsertAgent(ctx, hostname, serial, authorizedCN, labels)
+}
+func (m *mockDB) GetAgent(ctx context.Context, agentID uuid.UUID) (*Agent, error) {
+	if m.getAgent == nil {
+		return nil, status.Error(codes.NotFound, "agent not found")
+	}
+	return m.getAgent(ctx, agentID)
 }
 func (m *mockDB) GetVolumeByDevicePath(ctx context.Context, agentID uuid.UUID, devicePath string) (*Volume, error) {
 	return m.getVolumeByDevicePath(ctx, agentID, devicePath)
@@ -65,6 +74,18 @@ func (m *mockDB) CreateKeyVersion(ctx context.Context, id uuid.UUID, version int
 }
 func (m *mockDB) CreateTPMEnrollment(ctx context.Context, id uuid.UUID, ekPublic, ekCert, akPublic, akName []byte) (*TPMEnrollment, error) {
 	return m.createTPMEnrollment(ctx, id, ekPublic, ekCert, akPublic, akName)
+}
+func (m *mockDB) PinTPMEnrollmentPCRs(ctx context.Context, id uuid.UUID, pinnedPCRs []byte) error {
+	if m.pinTPMEnrollmentPCRs == nil {
+		return nil
+	}
+	return m.pinTPMEnrollmentPCRs(ctx, id, pinnedPCRs)
+}
+func (m *mockDB) ConsumeEnrollmentToken(ctx context.Context, tokenHash []byte, cn string) error {
+	if m.consumeEnrollmentTok == nil {
+		return nil
+	}
+	return m.consumeEnrollmentTok(ctx, tokenHash, cn)
 }
 
 // mockKeyStore implements KeyStore with configurable function fields.
@@ -100,11 +121,20 @@ func newTestServer(t *testing.T, db DBStore, ks KeyStore) (api.AgentServiceClien
 
 func newTestServerWithVerifier(t *testing.T, db DBStore, ks KeyStore, qv QuoteVerifier) (api.AgentServiceClient, api.LuksManagerClient, func()) {
 	t.Helper()
+	// The default harness exercises legacy plumbing paths, so it enables the
+	// unattested GetKey path. mTLS authz is off (insecure bufconn). Security
+	// tests use startTestServer with explicit flags instead.
+	return startTestServer(t, &server{db: db, vaultService: ks, quoteVerifier: qv, allowUnattestedGetKey: true})
+}
+
+// startTestServer wires the given server into an in-process gRPC server over
+// bufconn and returns clients plus a cleanup function.
+func startTestServer(t *testing.T, s *server) (api.AgentServiceClient, api.LuksManagerClient, func()) {
+	t.Helper()
 
 	lis := bufconn.Listen(bufSize)
 	srv := grpc.NewServer()
 
-	s := &server{db: db, vaultService: ks, quoteVerifier: qv}
 	api.RegisterAgentServiceServer(srv, s)
 	api.RegisterLuksManagerServer(srv, s)
 
@@ -211,7 +241,7 @@ func TestPostImaging_NewVolume(t *testing.T) {
 	kv := &KeyVersion{Version: 1, VaultKeyID: "v1", WrappedKey: "cipher"}
 
 	db := &mockDB{
-		upsertAgent:           func(_ context.Context, _, _ string, _ json.RawMessage) (*Agent, error) { return agent, nil },
+		upsertAgent:           func(_ context.Context, _, _, _ string, _ json.RawMessage) (*Agent, error) { return agent, nil },
 		getVolumeByDevicePath: func(_ context.Context, _ uuid.UUID, _ string) (*Volume, error) { return nil, nil },
 		upsertVolume:          func(_ context.Context, _ uuid.UUID, _, _ string) (*Volume, error) { return vol, nil },
 		createKeyVersion:      func(_ context.Context, _ uuid.UUID, _ int, _, _ string) (*KeyVersion, error) { return kv, nil },
@@ -251,7 +281,7 @@ func TestPostImaging_ExistingVolume_IncrementsVersion(t *testing.T) {
 	newKV := &KeyVersion{Version: 4, VaultKeyID: "v4", WrappedKey: "c"}
 
 	db := &mockDB{
-		upsertAgent:           func(_ context.Context, _, _ string, _ json.RawMessage) (*Agent, error) { return agent, nil },
+		upsertAgent:           func(_ context.Context, _, _, _ string, _ json.RawMessage) (*Agent, error) { return agent, nil },
 		getVolumeByDevicePath: func(_ context.Context, _ uuid.UUID, _ string) (*Volume, error) { return existingVol, nil },
 		getLatestKeyVersion:   func(_ context.Context, _ uuid.UUID) (*KeyVersion, error) { return latestKV, nil },
 		createKeyVersion:      func(_ context.Context, _ uuid.UUID, _ int, _, _ string) (*KeyVersion, error) { return newKV, nil },

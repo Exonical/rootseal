@@ -15,6 +15,20 @@ import (
 )
 
 func main() {
+	// Admin subcommands operate out-of-band against the database (mint
+	// single-use enrollment tokens, revoke a host). They are intentionally
+	// separate from the network-facing server surface.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "mint-enrollment-token":
+			runMintEnrollmentToken(os.Args[2:])
+			return
+		case "revoke-host":
+			runRevokeHost(os.Args[2:])
+			return
+		}
+	}
+
 	// Get configuration from environment variables
 	dbConnStr := os.Getenv("DATABASE_URL")
 	if dbConnStr == "" {
@@ -124,6 +138,15 @@ func main() {
 		KMSConfig:        kmsCfg,
 		TLS:              tlsCfg,
 		Debug:            os.Getenv("ROOTSEAL_DEBUG") == "true",
+
+		// Secure-by-default operating mode. Production (the default) requires
+		// mTLS, attestation, a non-empty enforced PCR policy, and Vault auth;
+		// the server refuses to start otherwise. Set ROOTSEAL_PRODUCTION=false
+		// for an explicit, loudly-warned dev mode.
+		Production:             os.Getenv("ROOTSEAL_PRODUCTION") != "false",
+		AllowInsecure:          os.Getenv("ROOTSEAL_ALLOW_INSECURE") == "true",
+		AllowUnattestedGetKey:  os.Getenv("ROOTSEAL_ALLOW_UNATTESTED_GETKEY") == "true",
+		RequireEnrollmentToken: os.Getenv("ROOTSEAL_REQUIRE_ENROLLMENT_TOKEN") != "false",
 	}
 
 	if err := controlplane.NewServerWithConfig(cfg); err != nil {

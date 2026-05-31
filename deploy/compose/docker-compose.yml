@@ -54,18 +54,28 @@ services:
       DATABASE_URL: "postgres://rootseal:dev-password@postgres:5432/rootseal?sslmode=disable"
       VAULT_ADDR: "http://vault:8200"
       VAULT_TOKEN: "dev-root-token"  # Dev only; use VAULT_ROLE_ID/VAULT_SECRET_ID in production
-      # VAULT_ROLE_ID: ""    # AppRole auth (preferred over static token)
+      # VAULT_ROLE_ID: ""    # AppRole auth (preferred; vault-init.sh prints role_id/secret_id)
       # VAULT_SECRET_ID: ""
+      # ── Secure-by-default operating mode ──────────────────────────────────
+      # The server starts in PRODUCTION mode by default and refuses to run
+      # without mTLS + attestation + enforced PCR policy + Vault auth. This dev
+      # stack uses a plaintext DB/Vault and gRPC reflection, so it MUST opt into
+      # the loudly-warned non-production mode. Never set this in production.
+      ROOTSEAL_PRODUCTION: "false"
+      # Dev convenience: allow enrollment without minting a single-use token.
+      # In production omit this (default true) and mint tokens out-of-band with:
+      #   rootseal-controlplane mint-enrollment-token -cn <agent-cn> -ttl 15m
+      ROOTSEAL_REQUIRE_ENROLLMENT_TOKEN: "false"
       # TLS configuration (mTLS)
       TLS_CERT_FILE: "/etc/rootseal/certs/server.crt"
       TLS_KEY_FILE: "/etc/rootseal/certs/server.key"
       TLS_CA_FILE: "/etc/rootseal/certs/ca.crt"
       TLS_CLIENT_AUTH: "true"
-      # Debug mode (enables gRPC reflection — disable in production)
+      # Debug mode (enables gRPC reflection — forbidden in production mode)
       ROOTSEAL_DEBUG: "true"
       # TPM PCR policy configuration
-      TPM_REQUIRED_PCRS: "0,2,7"  # PCRs required in attestation quotes
-      TPM_ENFORCE_PCR_VALUES: "false"  # Set to "true" to enforce specific PCR values
+      TPM_REQUIRED_PCRS: "0,2,4,7"  # firmware, option ROMs, bootloader, Secure Boot state
+      TPM_ENFORCE_PCR_VALUES: "false"  # production mode forces this to true (pins per-volume PCRs)
       # EK_CERT_CA_FILE: "/etc/rootseal/certs/tpm-ca.pem"  # TPM manufacturer CA bundle
       # EK_VERIFY_STRICT: "false"  # Set to "true" to reject enrollments without valid EK cert
       # KMS provider configuration

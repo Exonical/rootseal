@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 
 	"github.com/hashicorp/vault-client-go"
 	"github.com/hashicorp/vault-client-go/schema"
@@ -48,9 +47,6 @@ func (v *VaultService) WrapKey(ctx context.Context, plaintext []byte) (*EncryptR
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt key with Vault Transit: %w", err)
 	}
-
-	// Debug log the response data
-	slog.Debug("vault transit encrypt response", "data", resp.Data)
 
 	ciphertext, ok := resp.Data["ciphertext"].(string)
 	if !ok {
