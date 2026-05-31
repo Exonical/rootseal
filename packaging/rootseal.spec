@@ -1,6 +1,11 @@
+# Version and release are overridable from CI so packages track git tags
+# automatically (see .github/workflows/build.yml and packaging/gen-changelog.sh).
+%global pkgver %{?_pkgver}%{!?_pkgver:0.1.0}
+%global pkgrel %{?_pkgrel}%{!?_pkgrel:1}
+
 Name:           rootseal
-Version:        0.1.0
-Release:        1%{?dist}
+Version:        %{pkgver}
+Release:        %{pkgrel}%{?dist}
 Summary:        Network-Bound Disk Encryption (NBDE) agent and control plane
 
 License:        Apache-2.0
@@ -12,11 +17,8 @@ Source0:        %{name}-%{version}.tar.gz
 # Pass --define "fips_build 1" to rpmbuild to produce the FIPS subpackage
 %bcond_with fips_build
 
-BuildRequires:  golang >= 1.21
+BuildRequires:  golang >= 1.26.3
 BuildRequires:  systemd-rpm-macros
-%if %{with fips_build}
-BuildRequires:  gcc
-%endif
 
 Requires:       cryptsetup
 Requires:       dracut
@@ -39,22 +41,24 @@ wrapped LUKS recovery keys, backed by HashiCorp Vault and PostgreSQL.
 
 %if %{with fips_build}
 %package fips
-Summary:        rootseal agent built with FIPS 140 BoringCrypto
+Summary:        rootseal agent built in native Go FIPS 140-3 mode
 Provides:       %{name} = %{version}-%{release}
 Obsoletes:      %{name} < %{version}-%{release}
 
 %description fips
-FIPS 140-2 compliant build of the rootseal agent. Compiled with
-GOEXPERIMENT=boringcrypto so all TLS and cryptographic operations
-use the Red Hat FIPS-validated BoringCrypto library.
+FIPS 140-3 build of the rootseal agent. Compiled with GOFIPS140=latest so the
+binary links the Go Cryptographic Module and runs in FIPS 140-3 mode by default
+(GODEBUG=fips140=on); no cgo/BoringCrypto dependency. See
+https://go.dev/doc/security/fips140.
 
 %package controlplane-fips
-Summary:        rootseal control plane built with FIPS 140 BoringCrypto
+Summary:        rootseal control plane built in native Go FIPS 140-3 mode
 Provides:       %{name}-controlplane = %{version}-%{release}
 Obsoletes:      %{name}-controlplane < %{version}-%{release}
 
 %description controlplane-fips
-FIPS 140-2 compliant build of the rootseal control plane server.
+FIPS 140-3 build of the rootseal control plane server (GOFIPS140=latest,
+native Go Cryptographic Module).
 %endif
 
 # ---------------------------------------------------------------------------
@@ -65,12 +69,12 @@ FIPS 140-2 compliant build of the rootseal control plane server.
 %build
 export GOFLAGS="-mod=vendor"
 export GOPATH=%{_builddir}/gopath
-
-%if %{with fips_build}
-export GOEXPERIMENT=boringcrypto
-export CGO_ENABLED=1
-%else
 export CGO_ENABLED=0
+
+# Native Go FIPS 140-3: link the frozen Go Cryptographic Module and enable
+# FIPS mode by default. No cgo/BoringCrypto required.
+%if %{with fips_build}
+export GOFIPS140=latest
 %endif
 
 go build -v \
