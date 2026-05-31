@@ -30,6 +30,8 @@ jobs:
         uses: withastro/action@v3
         with:
           path: ./docs
+          # Astro 6 requires Node >= 22.12.0; the action defaults to Node 20.
+          node-version: 22
 
   deploy:
     name: Deploy to GitHub Pages
