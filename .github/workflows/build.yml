@@ -79,6 +79,9 @@ jobs:
       image: rockylinux/rockylinux:10
 
     steps:
+      - name: Install git (checkout needs it to create a local repo with history)
+        run: dnf install -y git
+
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -187,6 +190,9 @@ jobs:
       image: rockylinux/rockylinux:10
 
     steps:
+      - name: Install git (checkout needs it to create a local repo with history)
+        run: dnf install -y git
+
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
