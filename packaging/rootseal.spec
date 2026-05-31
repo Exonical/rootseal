@@ -9,7 +9,7 @@ Release:        %{pkgrel}%{?dist}
 Summary:        Network-Bound Disk Encryption (NBDE) agent and control plane
 
 License:        Apache-2.0
-URL:            https://github.com/banglin/go-luks2
+URL:            https://github.com/Exonical/rootseal
 Source0:        %{name}-%{version}.tar.gz
 
 %global debug_package %{nil}
