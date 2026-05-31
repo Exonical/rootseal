@@ -1,0 +1,51 @@
+---
+title: Rootseal
+description: TPM-attested, Vault-backed unlocking of LUKS/root volumes — a modern replacement for Clevis+Tang.
+template: splash
+hero:
+  tagline: TPM-attested, Vault-backed unlocking of LUKS/root volumes. A modern replacement for Clevis+Tang.
+  actions:
+    - text: Get started
+      link: ./introduction/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/Exonical/rootseal
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What is Rootseal?
+
+Rootseal performs **TPM-attested, Vault-backed unlocking** of LUKS/root volumes.
+A small agent runs during early boot (initramfs) and asks a central control
+plane for the disk-unlock key. The key is only released after the host proves
+its identity with a TPM 2.0 attestation, presents a valid mTLS client
+certificate bound to that volume, and the control plane unwraps the key through
+HashiCorp Vault.
+
+<CardGrid stagger>
+  <Card title="Hardware-rooted trust" icon="approve-check">
+    Host identity is tied to a TPM-resident Attestation Key, not mutable
+    metadata like hostname or serial number.
+  </Card>
+  <Card title="Secure by default" icon="setting">
+    The server runs in production mode by default and refuses to start without
+    mTLS, attestation, a non-empty PCR policy, and Vault auth.
+  </Card>
+  <Card title="Vault-backed keys" icon="seti:lock">
+    Recovery keys are wrapped with Vault Transit and never persisted in
+    plaintext; the server uses a short-lived, least-privilege AppRole.
+  </Card>
+  <Card title="Native Go FIPS 140-3" icon="seti:go">
+    FIPS builds link the Go Cryptographic Module via `GOFIPS140=latest` — no
+    cgo/BoringCrypto dependency.
+  </Card>
+</CardGrid>
+
+## Next steps
+
+- New here? Read the [Introduction](./introduction/).
+- Want to try it? Follow the [Quick start](./quick-start/) to bring up the local stack.
+- Operating a fleet? See [Installation](./operations/installation/) and [Configuration](./operations/configuration/).
