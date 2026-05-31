@@ -13,9 +13,9 @@ jobs:
     name: Test & Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -43,9 +43,9 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -65,7 +65,7 @@ jobs:
             ./cmd/controlplane
 
       - name: Upload binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binaries-linux-${{ matrix.arch }}
           path: bin/
@@ -79,24 +79,50 @@ jobs:
       image: rockylinux/rockylinux:10
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Install git (checkout needs it to create a local repo with history)
+        run: dnf install -y git
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install build dependencies
         run: |
-          dnf install -y golang systemd-rpm-macros rpm-build rpmdevtools git make
+          dnf install -y systemd-rpm-macros rpm-build rpmdevtools git make tar gzip
+
+      - name: Install Go (matches go.mod / spec minimum)
+        run: |
+          GOVER="$(sed -n 's/^go //p' go.mod)"
+          echo "Installing Go ${GOVER}"
+          curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tgz
+          rm -rf /usr/local/go
+          tar -C /usr/local -xzf /tmp/go.tgz
+          ln -sf /usr/local/go/bin/go /usr/local/bin/go
+          ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+          go version
 
       - name: Vendor Go modules
         run: go mod vendor
 
       - name: Build RPMs
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          VERSION="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null | sed 's/^v//')"
+          VERSION="${VERSION:-0.1.0}"
+          RELEASE=1
+          echo "Building rootseal ${VERSION}-${RELEASE}"
           rpmdev-setuptree
-          tar --transform 's,^,rootseal-0.1.0/,' \
+          tar --transform "s,^,rootseal-${VERSION}/," \
               --exclude='.git' \
               --exclude='bin' \
-              -czf ~/rpmbuild/SOURCES/rootseal-0.1.0.tar.gz .
+              -czf ~/rpmbuild/SOURCES/rootseal-${VERSION}.tar.gz .
           cp packaging/rootseal.spec ~/rpmbuild/SPECS/rootseal.spec
-          rpmbuild -ba ~/rpmbuild/SPECS/rootseal.spec
+          sed -i '/^%changelog/,$d' ~/rpmbuild/SPECS/rootseal.spec
+          { echo '%changelog'; sh packaging/gen-changelog.sh "${VERSION}" "${RELEASE}"; } >> ~/rpmbuild/SPECS/rootseal.spec
+          rpmbuild -ba --nodeps \
+            --define "_pkgver ${VERSION}" \
+            --define "_pkgrel ${RELEASE}" \
+            ~/rpmbuild/SPECS/rootseal.spec
 
       - name: Collect RPMs
         run: |
@@ -105,31 +131,28 @@ jobs:
           ls -lh rpms/
 
       - name: Upload RPMs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rpms
           path: rpms/
 
-  # ── 4. FIPS Binaries (amd64 only, requires CGO + gcc) ──────────────────────
+  # ── 4. FIPS Binaries (amd64, native Go FIPS 140-3) ──────────────────────────
   build-fips-binaries:
     name: Build FIPS Binaries
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Install gcc
-        run: sudo apt-get install -y gcc
-
       - name: Build FIPS binaries
         env:
-          GOEXPERIMENT: boringcrypto
-          CGO_ENABLED: "1"
+          GOFIPS140: latest
+          CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: amd64
         run: |
@@ -141,14 +164,19 @@ jobs:
             -o bin/rootseal-controlplane-fips-linux-amd64 \
             ./cmd/controlplane
 
-      - name: Verify BoringCrypto build metadata
+      - name: Verify native FIPS 140-3 build metadata
         run: |
-          go version -m bin/rootseal-fips-linux-amd64 | grep -q "boringcrypto" && \
-            echo "rootseal-fips: BoringCrypto OK" || \
-            (echo "ERROR: BoringCrypto not found in build metadata" && exit 1)
+          for b in bin/rootseal-fips-linux-amd64 bin/rootseal-controlplane-fips-linux-amd64; do
+            if go version -m "$b" | grep -q "GOFIPS140=latest"; then
+              echo "$b: native FIPS 140-3 OK"
+            else
+              echo "ERROR: GOFIPS140 not found in $b build metadata"
+              exit 1
+            fi
+          done
 
       - name: Upload FIPS binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binaries-fips-linux-amd64
           path: bin/
@@ -162,25 +190,50 @@ jobs:
       image: rockylinux/rockylinux:10
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Install git (checkout needs it to create a local repo with history)
+        run: dnf install -y git
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install build dependencies
         run: |
-          dnf install -y golang gcc systemd-rpm-macros rpm-build rpmdevtools git make
+          dnf install -y systemd-rpm-macros rpm-build rpmdevtools git make tar gzip
+
+      - name: Install Go (matches go.mod / spec minimum)
+        run: |
+          GOVER="$(sed -n 's/^go //p' go.mod)"
+          echo "Installing Go ${GOVER}"
+          curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tgz
+          rm -rf /usr/local/go
+          tar -C /usr/local -xzf /tmp/go.tgz
+          ln -sf /usr/local/go/bin/go /usr/local/bin/go
+          ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+          go version
 
       - name: Vendor Go modules
         run: go mod vendor
 
       - name: Build FIPS RPMs
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          VERSION="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null | sed 's/^v//')"
+          VERSION="${VERSION:-0.1.0}"
+          RELEASE=1
+          echo "Building rootseal ${VERSION}-${RELEASE} (FIPS)"
           rpmdev-setuptree
-          tar --transform 's,^,rootseal-0.1.0/,' \
+          tar --transform "s,^,rootseal-${VERSION}/," \
               --exclude='.git' \
               --exclude='bin' \
-              -czf ~/rpmbuild/SOURCES/rootseal-0.1.0.tar.gz .
+              -czf ~/rpmbuild/SOURCES/rootseal-${VERSION}.tar.gz .
           cp packaging/rootseal.spec ~/rpmbuild/SPECS/rootseal.spec
-          rpmbuild -ba \
+          sed -i '/^%changelog/,$d' ~/rpmbuild/SPECS/rootseal.spec
+          { echo '%changelog'; sh packaging/gen-changelog.sh "${VERSION}" "${RELEASE}"; } >> ~/rpmbuild/SPECS/rootseal.spec
+          rpmbuild -ba --nodeps \
             --with fips_build \
+            --define "_pkgver ${VERSION}" \
+            --define "_pkgrel ${RELEASE}" \
             ~/rpmbuild/SPECS/rootseal.spec
 
       - name: Collect FIPS RPMs
@@ -190,7 +243,7 @@ jobs:
           ls -lh rpms-fips/
 
       - name: Upload FIPS RPMs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rpms-fips
           path: rpms-fips/
@@ -206,31 +259,31 @@ jobs:
 
     steps:
       - name: Download binaries (amd64)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: binaries-linux-amd64
           path: release/
 
       - name: Download binaries (arm64)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: binaries-linux-arm64
           path: release/
 
       - name: Download RPMs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: rpms
           path: release/
 
       - name: Download FIPS binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: binaries-fips-linux-amd64
           path: release/
 
       - name: Download FIPS RPMs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: rpms-fips
           path: release/
